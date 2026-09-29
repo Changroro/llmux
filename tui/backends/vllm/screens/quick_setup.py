@@ -390,7 +390,7 @@ class QuickSetupScreen(ModalScreen[str]):
                     model_id=model,
                     enable_lora="true" if lora else "false",
                 )
-                save_config(config)
+                save_config(config, template=source.read_text() if copy_from else None)
                 save_profile(profile)
         except (OSError, RuntimeError, ValueError) as exc:
             self.notify(str(exc), severity="error", timeout=8)

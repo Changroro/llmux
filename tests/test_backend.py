@@ -4102,7 +4102,7 @@ class ComposeEnvExpansionTests(unittest.TestCase):
         profile = backend.Profile(name="p", config_name="p", port=8000)
         with patch.dict(os.environ, {"USER": "alice"}, clear=False), \
              patch.object(vrt, "_common_env",
-                          lambda: {"HF_CACHE_PATH": "/home/$USER/.cache/huggingface"}), \
+                          lambda **kwargs: {"HF_CACHE_PATH": "/home/alice/.cache/huggingface"}), \
              patch.object(
                  vrt,
                  "_parse_env_file",
@@ -4123,11 +4123,12 @@ class ComposeEnvExpansionTests(unittest.TestCase):
         profile = lbackend.Profile(name="p", config_name="p", port=8080)
         calls = {"n": 0}
 
-        def fake_parse(_p):
+        def fake_parse(_p, *, expand=False):
             # First call is COMMON_ENV, second is the profile .env.
             calls["n"] += 1
             if calls["n"] == 1:
-                return {"HF_CACHE_PATH": "/home/$USER/.cache/huggingface"}
+                self.assertTrue(expand)
+                return {"HF_CACHE_PATH": "/home/alice/.cache/huggingface"}
             return {"MY_VAR": "$HOME/x", "CONFIG_NAME": "$HOME/config"}
 
         with patch.dict(os.environ, {"USER": "alice"}, clear=False), \

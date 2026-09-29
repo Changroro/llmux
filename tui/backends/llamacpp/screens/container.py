@@ -276,7 +276,12 @@ class ContainerUpScreen(Screen):
             btn = radio_set.query_one(f"#{VER_DEV}", RadioButton)
         except Exception:
             return
-        images = await list_local_dev_images(LLAMACPP_DEV_SPEC)
+        try:
+            images = await list_local_dev_images(LLAMACPP_DEV_SPEC)
+        except RuntimeError as exc:
+            btn.label = t("Dev Build (image lookup failed)", "개발 빌드 (이미지 조회 실패)")
+            self.notify(str(exc), severity="error")
+            return
         self._has_local_dev = bool(images)
         label = (
             t(
@@ -311,7 +316,7 @@ class ContainerUpScreen(Screen):
     def _cleanup(self) -> None:
         if self._gpu_timer is not None:
             self._gpu_timer.stop()
-        self.workers.cancel_all()
+        self.workers.cancel_node(self)
 
     @on(Button.Pressed, "#cancel-btn")
     def _on_cancel(self) -> None:

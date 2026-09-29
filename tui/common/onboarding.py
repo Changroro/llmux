@@ -64,6 +64,13 @@ def run_onboarding() -> bool:
 
     console = Console()
 
+    if COMMON_ENV.exists():
+        ok, messages = validate_common_env(COMMON_ENV)
+        if not ok:
+            console.print("\n".join(messages), markup=False)
+            console.print(f"Fix {COMMON_ENV}; existing settings were preserved.", markup=False)
+        return ok
+
     if not COMMON_ENV_EXAMPLE.exists():
         return False
 

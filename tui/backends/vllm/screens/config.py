@@ -836,10 +836,7 @@ class ConfigListScreen(Screen):
                         raise ValueError(f"config not found: {source}")
                     if destination.exists():
                         raise ValueError(f"config already exists: {destination}")
-                    cfg = load_config(name)
-                    cfg.name = new_name
-                    cfg._source_text = None
-                    save_config(cfg)
+                    profile_store._atomic_write(destination, source.read_text())
             except (OSError, RuntimeError, ValueError) as exc:
                 self.notify(str(exc), severity="error", timeout=8)
                 return

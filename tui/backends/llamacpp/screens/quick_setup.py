@@ -575,7 +575,7 @@ class QuickSetupScreen(ModalScreen[str]):
                     hf_repo=repo,
                     hf_file=gguf_file,
                 )
-                save_config(config)
+                save_config(config, template=source.read_text() if copy_from else None)
                 save_profile(profile)
         except (OSError, RuntimeError, ValueError) as exc:
             self.notify(str(exc), severity="error", timeout=8)

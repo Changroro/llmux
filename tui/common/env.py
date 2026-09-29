@@ -32,7 +32,7 @@ def _read_double_quoted(s: str) -> str:
     return "".join(out)
 
 
-def parse_env_file(path: Path | str) -> dict[str, str]:
+def parse_env_file(path: Path | str, *, expand: bool = False) -> dict[str, str]:
     """Parse a .env file the way docker compose (godotenv) does.
 
     Rules: split on the first `=`; strip surrounding whitespace. A value that
@@ -71,6 +71,8 @@ def parse_env_file(path: Path | str) -> dict[str, str]:
             if " #" in value:
                 value = value[: value.index(" #")]
             data[key] = value.rstrip()
+        if expand and not value.startswith("'"):
+            data[key] = host_expand(data[key])
     return data
 
 

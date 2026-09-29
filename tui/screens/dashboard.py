@@ -565,13 +565,16 @@ class DashboardScreen(Screen):
             on_ok,
         )
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="benchmark")
     async def _run_vllm_bench(self, row: DashboardRow) -> None:
         if not row.port:
             self.notify(t("No port information", "포트 정보 없음"), severity="error")
             return
         try:
-            models = await list_served_models(row.port)
+            from tui.common.http import profile_api_key
+
+            api_key = await profile_api_key("vllm", row.profile_name)
+            models = await list_served_models(row.port, **({"api_key": api_key} if api_key else {}))
             model = models[0] if models else (row.model or "")
             if not model:
                 raise RuntimeError(
@@ -586,6 +589,7 @@ class DashboardScreen(Screen):
             r = await run_bench(
                 row.port,
                 model,
+                **({"api_key": api_key} if api_key else {}),
                 runs=BENCH_RUNS,
                 warmup=BENCH_WARMUP,
             )
@@ -727,11 +731,14 @@ class DashboardScreen(Screen):
         self._reload()
         self._poll_gpu()
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="benchmark")
     async def _run_llamacpp_bench(self, profile) -> None:
         try:
             config_name = profile.config_name or profile.name
             cfg = lbackend.load_config(config_name)
+            from tui.common.http import config_api_key
+
+            api_key = await config_api_key(cfg.params, profile.container_name, backend="llamacpp", env=profile.env_vars)
             alias = cfg.get("alias", config_name)
             if not isinstance(alias, str) or not alias.strip():
                 raise ValueError(f"invalid benchmark alias in config {config_name!r}")
@@ -746,6 +753,7 @@ class DashboardScreen(Screen):
             r = await run_bench(
                 profile.port,
                 alias,
+                **({"api_key": api_key} if api_key else {}),
                 runs=BENCH_RUNS,
                 warmup=BENCH_WARMUP,
             )

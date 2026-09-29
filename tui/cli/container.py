@@ -296,10 +296,11 @@ def benchmark(
         raise typer.Exit(code=2)
 
     async def _run() -> dict:
-        from tui.common.http import list_served_models, run_bench
+        from tui.common.http import list_served_models, profile_api_key, run_bench
 
+        api_key = await profile_api_key(bk, profile)
         if bk == "vllm":
-            served = await list_served_models(sp.port)
+            served = await list_served_models(sp.port, **({"api_key": api_key} if api_key else {}))
             model = served[0] if served else (sp.model_id or "")
             if not model:
                 raise RuntimeError(
@@ -319,6 +320,7 @@ def benchmark(
             max_tokens=max_tokens,
             runs=runs,
             warmup=warmup,
+            **({"api_key": api_key} if api_key else {}),
         )
         return {
             "profile": profile,

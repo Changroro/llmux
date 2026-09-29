@@ -50,7 +50,7 @@ _VLLM_DOWNLOAD_SNIPPET = (
     + _WORKERS_SNIPPET +
     "print('skipping (vLLM does not load it):', ignore, extra);"
     "print('snapshot:', snapshot_download("
-    "os.environ['LLMUX_PREPARE_MODEL'], ignore_patterns=ignore, **extra))"
+    "os.environ['LLMUX_PREPARE_MODEL'], revision=os.environ.get('LLMUX_PREPARE_REVISION') or None, ignore_patterns=ignore, **extra))"
 )
 
 _GGUF_DOWNLOAD_SNIPPET = (
@@ -66,6 +66,12 @@ _GGUF_DOWNLOAD_SNIPPET = (
 _SPLIT_SHARD_RE = re.compile(
     r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$"
 )
+
+
+def resolve_gguf_file(configured: str | None, model_file: str, hf_file: str) -> str:
+    if configured is not None and not isinstance(configured, str):
+        raise ValueError("config key 'model-file' must be a string")
+    return (hf_file or configured or model_file).strip()
 
 
 def hf_file_error(hf_file: str) -> str:
@@ -167,9 +173,12 @@ async def _run(*args: str, timeout: float = 30) -> tuple[int, str]:
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         return -1, "Command timed out"
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, (out or b"").decode(errors="replace")
 
@@ -235,12 +244,11 @@ async def stream_lines(args: list[str], *, env: dict[str, str] | None = None):
             yield ("log", tail)
         await proc.wait()
         yield ("rc", proc.returncode if proc.returncode is not None else -1)
-    except asyncio.CancelledError:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.kill()
-        with contextlib.suppress(ProcessLookupError, OSError):
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
             await proc.wait()
-        raise
 
 
 async def image_present(image_ref: str) -> bool:
@@ -268,6 +276,7 @@ async def stream_vllm_download(
     token: str,
     container_name: str,
     max_workers: int | None = None,
+    revision: str = "",
 ):
     """Download a HF snapshot with the image's own huggingface_hub."""
     cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
@@ -282,6 +291,8 @@ async def stream_vllm_download(
         "-e", f"LLMUX_PREPARE_MODEL={model_id}",
         "-e", f"LLMUX_PREPARE_IGNORE={','.join(_VLLM_IGNORE_PATTERNS)}",
     ] + workers_env(max_workers)
+    if revision:
+        args += ["-e", f"LLMUX_PREPARE_REVISION={revision}"]
     process_env = None
     if token:
         args += ["-e", "HF_TOKEN", "-e", "HUGGING_FACE_HUB_TOKEN"]
@@ -294,7 +305,7 @@ async def stream_vllm_download(
         stream = stream_lines(args, env=process_env) if process_env else stream_lines(args)
         async for event in stream:
             yield event
-    except asyncio.CancelledError as exc:
+    except (asyncio.CancelledError, GeneratorExit) as exc:
         cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
         if cleanup_rc != 0:
             raise RuntimeError(
@@ -468,7 +479,7 @@ async def stream_llamacpp_download(
                 rc = int(event[1])
             else:
                 yield event
-    except asyncio.CancelledError as exc:
+    except (asyncio.CancelledError, GeneratorExit) as exc:
         cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
         if cleanup_rc != 0:
             raise RuntimeError(

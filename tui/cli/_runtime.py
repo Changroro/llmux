@@ -197,14 +197,22 @@ async def docker_logs_once(container_name: str, *, tail: int) -> int:
     except FileNotFoundError:
         print("Error: docker executable not found", file=sys.stderr)
         return 127
-    if proc.stdout is not None:
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            print(line.decode("utf-8", errors="replace").rstrip("\n"), flush=True)
-    await proc.wait()
-    return proc.returncode or 0
+    try:
+        if proc.stdout is not None:
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                print(line.decode("utf-8", errors="replace").rstrip("\n"), flush=True)
+        await proc.wait()
+        return proc.returncode or 0
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
 
 
 async def docker_logs_follow(container_name: str, *, tail: int) -> int:

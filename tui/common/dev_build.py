@@ -240,9 +240,14 @@ async def _run(
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         return -1, "Command timed out"
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     return proc.returncode or 0, (stdout or b"").decode(errors="replace")
 
 
@@ -282,16 +287,13 @@ async def _stream(
             yield ("log", line.decode(errors="replace").rstrip("\n"))
         await proc.wait()
         yield ("rc", proc.returncode or 0)
-    except asyncio.CancelledError:
-        try:
-            proc.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             await proc.wait()
-        except (asyncio.CancelledError, ProcessLookupError, OSError):
-            pass
-        raise
 
 
 async def clone_or_update(spec: DevBuildSpec, repo_url: str, branch: str):

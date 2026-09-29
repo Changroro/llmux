@@ -118,15 +118,14 @@ async def run_command(*args: str, timeout: float = 10) -> tuple[int, str]:
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
-            await proc.wait()
-        except (asyncio.CancelledError, ProcessLookupError, OSError):
-            pass
         return 1, ""
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     return proc.returncode or 0, stdout.decode("utf-8", errors="replace")
 
 

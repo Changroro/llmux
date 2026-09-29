@@ -259,7 +259,7 @@ def disk(
                 )
             files.sort(key=lambda item: item["size_bytes"], reverse=True)
 
-        target = str(model_dir if model_dir_exists else ROOT)
+        target = str(_nearest_existing_path(model_dir))
         used, avail, pct = run_async(get_disk_usage(target))
         total_gb = round(sum(f["size_bytes"] for f in files) / 1024**3, 1)
     except Exception as exc:

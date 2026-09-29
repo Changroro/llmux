@@ -10,7 +10,7 @@ from rich.console import Console
 
 from tui.common import docker as common_docker
 from tui.common.adapter import DashboardRow
-from tui.common.i18n import t
+from tui.common.i18n import lang, t
 from tui.common.metrics import MetricsSnapshot, MetricsUnavailableError, fetch_snapshot
 from tui.common.monitor_render import (
     INTERVAL_STEP,
@@ -49,7 +49,7 @@ def _key_ready() -> bool:
 
 
 def _toggle_lang() -> None:
-    os.environ["LLMUX_LANG"] = "en" if os.environ.get("LLMUX_LANG") == "ko" else "ko"
+    os.environ["LLMUX_LANG"] = "en" if lang() == "ko" else "ko"
 
 
 async def _running_rows() -> tuple[list[DashboardRow], list[str]]:
