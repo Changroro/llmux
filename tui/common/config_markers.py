@@ -100,10 +100,24 @@ def dump_active_config(existing_text: str | None, data: dict[str, Any]) -> str:
             "comment in it. Fix or delete the file first."
         )
 
-    for key in [k for k in existing if k not in data]:
-        del existing[key]
-    for key, value in data.items():
-        existing[key] = value
+    def merge(target, values):
+        if isinstance(target, dict) and isinstance(values, dict):
+            for key in [k for k in target if k not in values]:
+                del target[key]
+            for key, value in values.items():
+                target[key] = merge(target.get(key), value)
+            return target
+        if isinstance(target, list) and isinstance(values, list):
+            del target[len(values):]
+            for index, value in enumerate(values):
+                if index < len(target):
+                    target[index] = merge(target[index], value)
+                else:
+                    target.append(value)
+            return target
+        return values
+
+    merge(existing, data)
 
     buf = StringIO()
     ry.dump(existing, buf)

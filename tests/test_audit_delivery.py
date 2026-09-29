@@ -211,6 +211,7 @@ async def test_vllm_model_discovery_failure_is_reported_by_benchmark() -> None:
     row = _row("vllm", "bench-target")
     with (
         _dashboard_patches(),
+        patch("tui.common.http.profile_api_key", AsyncMock(return_value="")),
         patch(
             "tui.screens.dashboard.list_served_models",
             AsyncMock(side_effect=RuntimeError("invalid /v1/models response")),

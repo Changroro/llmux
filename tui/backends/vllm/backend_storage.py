@@ -151,7 +151,7 @@ def serialize_config(config: Config, existing: str | None = None) -> str:
     return text + render_disabled_markers(config.disabled_params)
 
 
-def save_config(config: Config) -> None:
+def save_config(config: Config, *, template: str | None = None) -> None:
     if not isinstance(config.model, str) or not config.model.strip():
         raise ValueError("model must be a non-empty string")
     gpu_mem = config.gpu_memory_utilization
@@ -173,7 +173,7 @@ def save_config(config: Config) -> None:
             )
         profile_store._atomic_write(
             config.path,
-            serialize_config(config, existing),
+            serialize_config(config, existing if existing is not None else template),
         )
         config._source_text = config.path.read_text()
 

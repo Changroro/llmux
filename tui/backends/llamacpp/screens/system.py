@@ -286,7 +286,9 @@ class SystemScreen(Screen):
                 files.sort(key=lambda item: item[1], reverse=True)
             hf_cache_dir = _get_hf_cache_dir()
             cached = list_cached_gguf()
-            probe_path = model_dir if model_dir_exists else ROOT
+            from tui.cli.system import _nearest_existing_path
+
+            probe_path = _nearest_existing_path(model_dir)
             used, avail, pct = await get_disk_usage(str(probe_path))
         except Exception as exc:
             log.write(f"[red]{exc}[/]")

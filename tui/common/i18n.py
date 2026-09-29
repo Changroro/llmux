@@ -28,8 +28,9 @@ def lang() -> str:
     if explicit in _VALID:
         return explicit
     for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        if os.environ.get(var, "")[:2].lower() == "ko":
-            return "ko"
+        locale = os.environ.get(var, "").strip()
+        if locale:
+            return "ko" if locale[:2].lower() == "ko" else "en"
     return "en"
 
 

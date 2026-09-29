@@ -806,7 +806,7 @@ def clone_profile(src: str, dst: str, backend: str) -> StoredProfile:
             config_name=source.config_name or src,
             env_vars=dict(source.env_vars),
         )
-        _save_profile_unlocked(clone)
+        create_profile(clone)
         return clone
 
 

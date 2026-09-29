@@ -242,7 +242,7 @@ class MonitorState:
             return None
         prev = self._prev_hist.get(field_name)
         self._prev_hist[field_name] = (h.sum, h.count)
-        if prev is not None and h.count - prev[1] > 0:
+        if prev is not None and h.count > prev[1] and h.sum >= prev[0]:
             return (h.sum - prev[0]) / (h.count - prev[1])
         return h.avg()
 

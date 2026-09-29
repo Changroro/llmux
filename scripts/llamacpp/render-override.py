@@ -13,6 +13,7 @@ _CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_CHECKOUT_ROOT))
 from tui.common import profile_store  # noqa: E402
 from tui.common.config_markers import load_yaml_mapping  # noqa: E402
+from tui.common.prepare import resolve_gguf_file  # noqa: E402
 
 ROOT = profile_store.PROJECT_ROOT
 CONFIG_DIR = ROOT / "config" / "llamacpp"
@@ -44,12 +45,7 @@ def render_command(
     ]
 
     configured_model_file = cfg.pop("model-file", "")
-    if configured_model_file is not None and not isinstance(configured_model_file, str):
-        raise ValueError(
-            "config key 'model-file' must be a string; "
-            f"got {type(configured_model_file).__name__}"
-        )
-    resolved_file = (hf_file or configured_model_file or model_file).strip()
+    resolved_file = resolve_gguf_file(configured_model_file, model_file, hf_file)
     resolved_repo = hf_repo.strip()
     if not resolved_repo:
         raise ValueError(

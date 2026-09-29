@@ -188,17 +188,19 @@ def args_to_config(args: list[str]) -> dict[str, Any]:
         if not tok.startswith("--"):
             i += 1
             continue
-        key = tok[2:]
-        if i + 1 < n and not args[i + 1].startswith("--"):
-            raw = args[i + 1]
-            try:
-                out[key] = yaml.safe_load(raw)
-            except yaml.YAMLError:
-                out[key] = raw
-            i += 2
-        else:
-            out[key] = True
+        key, equals, inline = tok[2:].partition("=")
+        i += 1
+        values = [inline] if equals else []
+        while not equals and i < n and not args[i].startswith("--"):
+            values.append(args[i])
             i += 1
+        parsed = []
+        for raw in values:
+            try:
+                parsed.append(yaml.safe_load(raw) if raw else "")
+            except yaml.YAMLError:
+                parsed.append(raw)
+        out[key] = parsed[0] if len(parsed) == 1 else parsed if parsed else True
     return out
 
 

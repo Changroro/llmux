@@ -19,7 +19,7 @@ from tui.common.conflicts import (
 from tui.common.docker import (
     run_command as _docker_run,
 )
-from tui.common.env import expand_env_values, validate_common_env
+from tui.common.env import validate_common_env
 
 from .backend import (
     COMMON_ENV,
@@ -169,9 +169,14 @@ async def _run(*args: str, env: dict[str, str] | None = None, timeout: float = 6
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         return -1, "Command timed out"
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, (stdout or b"").decode(errors="replace")
 
@@ -201,16 +206,13 @@ async def _stream(args: list[str], *, env: dict[str, str] | None = None):
         await proc.wait()
         rc = proc.returncode if proc.returncode is not None else -1
         yield ("rc", rc)
-    except asyncio.CancelledError:
-        try:
-            proc.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             await proc.wait()
-        except (asyncio.CancelledError, ProcessLookupError, OSError):
-            pass
-        raise
 
 
 def _override_path(profile_name: str) -> Path:
@@ -229,7 +231,7 @@ def _compose_files(profile: Profile) -> list[str]:
 def _compose_env(profile: Profile) -> dict[str, str]:
     env = os.environ.copy()
     if COMMON_ENV.exists():
-        env.update(expand_env_values(_parse_env_file(COMMON_ENV)))
+        env.update(_parse_env_file(COMMON_ENV, expand=True))
     if profile.path.exists():
         profile_env = _parse_env_file(profile.path)
         env.update(
@@ -376,14 +378,16 @@ async def get_container_statuses() -> list[ContainerStatus]:
     return statuses
 
 
-async def _models_endpoint_ready(port: str | int, timeout: int = 3) -> bool:
+async def _models_endpoint_ready(port: str | int, timeout: int = 3, *, api_key: str = "") -> bool:
     loop = asyncio.get_running_loop()
 
     def _probe() -> bool:
         try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/v1/models", timeout=timeout
-            ) as response:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
             data = payload.get("data", [])
             return any(isinstance(item, dict) and item.get("id") for item in data)
@@ -422,6 +426,13 @@ async def _post_start_validation(
     last_log_tail: str | None = None
     last_heartbeat = start
     downloaded_bytes = 0
+    from tui.common.http import config_api_key
+
+    try:
+        api_key = await config_api_key(load_config(profile.config_name or profile.name).params, profile.container_name, backend="llamacpp", env=profile.env_vars)
+    except (OSError, RuntimeError, ValueError) as exc:
+        yield ("result", False, [f"API authentication configuration failed: {exc}"])
+        return
 
     while True:
         rc, state = await _docker_run(
@@ -474,7 +485,7 @@ async def _post_start_validation(
             )
             return
 
-        if await _models_endpoint_ready(profile.port):
+        if await _models_endpoint_ready(profile.port, **({"api_key": api_key} if api_key else {})):
             yield ("result", True, [])
             return
 
@@ -887,7 +898,13 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         yield ("rc", 1)
         return
 
-    if not profile.hf_repo or not (profile.hf_file or profile.model_file):
+    try:
+        hf_file = prepare.resolve_gguf_file(load_config(profile.config_name or profile.name).get("model-file"), profile.model_file, profile.hf_file)
+    except (OSError, RuntimeError, ValueError) as exc:
+        yield ("log", f"Error: {exc}")
+        yield ("rc", 1)
+        return
+    if not profile.hf_repo or not hf_file:
         yield ("log", f"✗ '{profile_name}' 에 hf_repo / hf_file 이 없습니다 — 받을 GGUF 를 특정할 수 없습니다.")
         yield ("log", f"  llmux profile edit {profile_name} --hf-repo <org/repo> --hf-file <파일.gguf>")
         yield ("rc", 1)
@@ -939,8 +956,6 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         yield ("log", "✗ .env.common 의 HF_CACHE_PATH 가 비어 있습니다 — 받을 위치가 없습니다.")
         yield ("rc", 1)
         return
-
-    hf_file = profile.hf_file or profile.model_file
 
     yield ("log", f"▸ {profile.hf_repo} / {hf_file} 다운로드 → {cache_path}")
     rc = -1

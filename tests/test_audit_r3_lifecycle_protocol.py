@@ -260,7 +260,7 @@ def test_runtime_snapshot_renders_and_returns_the_same_latest_profile(
 
 def test_vllm_compose_env_uses_rendered_config_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(vllm_common, "RUNTIME_DIR", tmp_path)
-    monkeypatch.setattr(vllm_runtime, "_common_env", lambda: {})
+    monkeypatch.setattr(vllm_runtime, "_common_env", lambda **kwargs: {})
     stale = vllm_common.Profile(name="snap", config_name="old-config")
     stale.path.write_text(
         "CONTAINER_NAME=snap\n"

@@ -459,9 +459,9 @@ def clone_config(
                 f"destination config already exists: {dst_path} (use --overwrite)",
                 param_hint="DST",
             )
-        data = _backend_load_config(bk, src)
-        disabled = _backend_load_disabled(bk, src)
-        saved = _backend_save_config(bk, dst, data, disabled)
+        source = _config_dir(bk) / f"{src}.yaml"
+        profile_store._atomic_write(dst_path, source.read_text())
+        saved = dst_path
     print(saved)
 
 

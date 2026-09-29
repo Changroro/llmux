@@ -23,9 +23,12 @@ async def run_command(*args: str, timeout: float = 30) -> tuple[int, str]:
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         return -1, "Command timed out"
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, (stdout or b"").decode(errors="replace")
 
@@ -50,9 +53,12 @@ async def run_command_with_options(
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         return -1, "Command timed out"
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, (stdout or b"").decode(errors="replace")
 
@@ -85,16 +91,8 @@ async def stream_command(
         await proc.wait()
         rc = proc.returncode if proc.returncode is not None else -1
         yield ("rc", rc)
-    except asyncio.CancelledError:
-        # Async generator cleanup (interpreter shutdown, athrow during
-        # asyncio.run finalization, or explicit caller cancel) lands here.
-        # If the underlying compose/docker process has already exited,
-        # proc.kill() raises ProcessLookupError that escapes as an
-        # "unhandled exception during asyncio.run() shutdown" traceback.
-        # Suppress these specifically — actual signal-delivery failures
-        # for live processes still surface via wait()'s return code.
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.kill()
-        with contextlib.suppress(ProcessLookupError, OSError):
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
             await proc.wait()
-        raise

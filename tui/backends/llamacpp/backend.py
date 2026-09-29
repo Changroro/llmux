@@ -282,15 +282,17 @@ def list_profiles(running: set[str] | None = None) -> list[Profile]:
     result: list[Profile] = []
     for name in list_profile_names():
         p = load_profile(name)
-        if p.model_file and p.hf_repo:
-            model_paths = [model_dir / name for name in gguf_shard_names(p.model_file)]
+        from tui.common.prepare import resolve_gguf_file
+
+        filename = resolve_gguf_file(load_config(p.config_name or p.name).get("model-file"), p.model_file, p.hf_file)
+        if filename and p.hf_repo:
+            model_paths = [model_dir / name for name in gguf_shard_names(filename)]
             if all(path.exists() for path in model_paths):
                 p.downloaded = True
                 p.model_size_gb = round(
                     sum(path.stat().st_size for path in model_paths) / 1024**3, 1
                 )
         if not p.downloaded:
-            filename = p.hf_file or p.model_file
             cached = find_cached_gguf(p.hf_repo, filename)
             if cached is not None:
                 relative_parts = Path(gguf_shard_names(filename)[0]).parts
@@ -328,11 +330,11 @@ def load_config(name: str) -> Config:
     return Config(name=name, params=params, disabled_params=disabled)
 
 
-def save_config(config: Config) -> None:
+def save_config(config: Config, *, template: str | None = None) -> None:
     with profile_store.storage_transaction():
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         existing = config.path.read_text() if config.path.exists() else None
-        text = dump_active_config(existing, config.params)
+        text = dump_active_config(existing if existing is not None else template, config.params)
         profile_store._atomic_write(
             config.path,
             text + render_disabled_markers(config.disabled_params),

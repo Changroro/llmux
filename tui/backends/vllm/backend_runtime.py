@@ -44,7 +44,7 @@ from tui.common.conflicts import (
     gpu_conflict_messages as _shared_gpu_conflict_messages,
     published_tcp_host_ports,
 )
-from tui.common.env import expand_env_values, validate_common_env
+from tui.common.env import validate_common_env
 
 
 _BUILD_LOCK = asyncio.Lock()
@@ -62,8 +62,8 @@ _COMPOSE_PROFILE_ENV_KEYS = frozenset(
 )
 
 
-def _common_env() -> dict[str, str]:
-    return _parse_env_file(COMMON_ENV)
+def _common_env(*, expand: bool = False) -> dict[str, str]:
+    return _parse_env_file(COMMON_ENV, expand=expand)
 
 
 def get_dev_build_defaults() -> tuple[str, str]:
@@ -226,7 +226,7 @@ def _compose_env(
     vllm_image: str = "",
 ) -> dict[str, str]:
     env = os.environ.copy()
-    env.update(expand_env_values(_common_env()))
+    env.update(_common_env(expand=True))
     profile_env = _parse_env_file(profile.path)
     env.update(
         {key: profile_env[key] for key in _COMPOSE_PROFILE_ENV_KEYS if key in profile_env}
@@ -514,15 +514,17 @@ async def check_port_conflict(profile: Profile) -> str | None:
     return None
 
 
-async def _models_endpoint_ready(port: str, timeout: int = 3) -> bool:
+async def _models_endpoint_ready(port: str, timeout: int = 3, *, api_key: str = "") -> bool:
     """Return True when /v1/models responds with at least one served model id."""
     loop = asyncio.get_running_loop()
 
     def _probe() -> bool:
         try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/v1/models", timeout=timeout
-            ) as response:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
             data = payload.get("data", [])
             return any(isinstance(item, dict) and item.get("id") for item in data)
@@ -561,6 +563,13 @@ async def _post_start_validation(
     last_log_tail: str | None = None
     last_heartbeat = start
     downloaded_bytes = 0
+    from tui.common.http import config_api_key
+
+    try:
+        api_key = await config_api_key(load_config(profile.config_name or profile.name).extra_params, profile.container_name, env=profile.env_vars)
+    except (OSError, RuntimeError, ValueError) as exc:
+        yield ("result", False, [f"API authentication configuration failed: {exc}"])
+        return
 
     while True:
         rc, state = await run_command(
@@ -624,7 +633,7 @@ async def _post_start_validation(
             )
             return
 
-        if await _models_endpoint_ready(profile.port):
+        if await _models_endpoint_ready(profile.port, **({"api_key": api_key} if api_key else {})):
             yield ("result", True, [])
             return
 
@@ -1162,6 +1171,7 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
     async for event in prepare.stream_vllm_download(
         image_ref=image_ref,
         model_id=model,
+        revision=config.extra_params.get("revision") or "",
         cache_path=cache_path,
         token=prepare.hf_token(),
         container_name=prepare.prepare_container_name(profile.container_name),

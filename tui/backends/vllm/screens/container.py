@@ -294,7 +294,11 @@ class ContainerUpScreen(Screen):
         except Exception:
             pass
 
-        release_ver = await get_dockerhub_release_version()
+        try:
+            release_ver = await get_dockerhub_release_version()
+        except RuntimeError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            release_ver = "unknown"
         self._release_version = release_ver if release_ver != "unknown" else ""
         try:
             btn = radio_set.query_one(f"#{VER_OFFICIAL}", RadioButton)
@@ -386,7 +390,7 @@ class ContainerUpScreen(Screen):
     def _cleanup(self) -> None:
         if self._gpu_timer is not None:
             self._gpu_timer.stop()
-        self.workers.cancel_all()
+        self.workers.cancel_node(self)
 
     @on(Button.Pressed, "#cancel-btn")
     def _on_cancel(self) -> None:
@@ -475,7 +479,11 @@ class ContainerUpScreen(Screen):
             use_default_image = True
         elif selected_id == VER_OFFICIAL:
             if not self._release_version:
-                refreshed = await get_dockerhub_release_version()
+                try:
+                    refreshed = await get_dockerhub_release_version()
+                except RuntimeError as exc:
+                    self.notify(str(exc), severity="error", timeout=8)
+                    return
                 if refreshed == "unknown":
                     self.app.notify(
                         t(
@@ -673,5 +681,5 @@ class LogScreen(Screen):
         )
 
     def action_go_back(self) -> None:
-        self.workers.cancel_all()
+        self.workers.cancel_node(self)
         self.app.pop_screen()

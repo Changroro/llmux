@@ -11,7 +11,7 @@ from textual.widgets import Footer, Header, Static
 
 from tui.common import docker as common_docker
 from tui.common.adapter import DashboardRow
-from tui.common.i18n import t
+from tui.common.i18n import lang, t
 from tui.common.monitor_render import (
     INTERVAL_STEP,
     MAX_INTERVAL,
@@ -133,7 +133,7 @@ class MonitorScreen(Screen):
         self._repaint()
 
     def action_toggle_lang(self) -> None:
-        os.environ["LLMUX_LANG"] = "en" if os.environ.get("LLMUX_LANG") == "ko" else "ko"
+        os.environ["LLMUX_LANG"] = "en" if lang() == "ko" else "ko"
         self._repaint()
 
     def action_go_back(self) -> None:
