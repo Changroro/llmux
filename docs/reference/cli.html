@@ -179,6 +179,7 @@ llmux --version            # print the installed version and exit</code></pre>
         <tr><td><code>--repo-url</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td><code>--dev</code> only: override the source repo URL (default from <code>VLLM_REPO_URL</code> / <code>LLAMACPP_REPO_URL</code>).</td></tr>
         <tr><td><code>--branch</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td><code>--dev</code> only: override the source branch (default from <code>VLLM_BRANCH</code> / <code>LLAMACPP_BRANCH</code>).</td></tr>
         <tr><td><code>--force</code></td><td><code>False</code></td><td>both</td><td>Allow a detected GPU overlap. Port conflicts and failed port probes always abort.</td></tr>
+        <tr><td><code>--replace</code></td><td><code>False</code></td><td>both</td><td>Stop managed models sharing the target GPUs, verify their exit, then start this profile. Cannot be combined with --force.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code># Start a vLLM profile (official image, highest local versioned tag)

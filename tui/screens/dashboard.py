@@ -422,8 +422,8 @@ class DashboardScreen(Screen):
     @work(exclusive=False, group="conflict-check")
     async def _check_and_confirm(self, row: DashboardRow, on_ok) -> None:
         modal_generation = self.app.modal_generation
-        port_msgs = port_conflicts(row, self._rows)
-        gpu_msgs = gpu_conflicts(row, self._rows)
+        remaining = [r for r in self._rows if not gpu_conflicts(row, [r])]
+        port_msgs = port_conflicts(row, remaining)
         probe_msgs: list[str] = []
         if self._scan_errors:
             failed = ", ".join(sorted(self._scan_errors))
@@ -444,7 +444,7 @@ class DashboardScreen(Screen):
         if not self.app.can_push_modal(modal_generation):
             return
 
-        if not port_msgs and not gpu_msgs and not ext_msgs and not probe_msgs:
+        if not port_msgs and not ext_msgs and not probe_msgs:
             on_ok()
             return
 
@@ -462,34 +462,12 @@ class DashboardScreen(Screen):
                 lines.append("")
             lines.append("[b]Port conflict (external):[/b]")
             lines += [f"  • {m}" for m in ext_msgs]
-        if gpu_msgs:
-            if lines:
-                lines.append("")
-            lines.append("[b]GPU conflict:[/b]")
-            lines += [f"  • {m}" for m in gpu_msgs]
-        hard_conflict = bool(port_msgs or ext_msgs or probe_msgs)
         lines.append("")
-        lines.append(
-            "Resolve the port check before starting."
-            if hard_conflict
-            else "Proceed despite the GPU overlap?"
-        )
+        lines.append("Resolve the port check before starting.")
         message = "\n".join(lines)
-
-        if hard_conflict:
-            self.app.push_screen(
-                ConfirmModal(message, confirm_label="Close", variant="error"),
-                lambda _confirmed: None,
-            )
-            return
-
-        def after(proceed: bool) -> None:
-            if proceed:
-                on_ok()
-
         self.app.push_screen(
-            ConfirmModal(message, confirm_label="Start with GPU overlap", variant="warning"),
-            after,
+            ConfirmModal(message, confirm_label="Close", variant="error"),
+            lambda _confirmed: None,
         )
 
 

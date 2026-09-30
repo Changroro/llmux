@@ -149,6 +149,7 @@ class ContainerUpScreen(Screen):
         self._dev_repo_url, self._dev_branch = get_dev_build_defaults()
         self._has_local_dev: bool = False
         self._gpu_timer = None
+        self._start_worker = None
         self._gpu_probe_error = ""
 
     def compose(self) -> ComposeResult:
@@ -330,6 +331,8 @@ class ContainerUpScreen(Screen):
         self.app.pop_screen()
 
     def action_confirm_start(self) -> None:
+        if self._start_worker is not None and not self._start_worker.is_finished:
+            return
         try:
             if str(self.query_one("#version-scroll").styles.display) == "none":
                 return
@@ -363,7 +366,7 @@ class ContainerUpScreen(Screen):
         if pressed.id == VER_DEV and not self.query_one("#dev-repo-input", Input).value.strip():
             self.query_one("#dev-repo-input", Input).focus()
             return
-        self._do_start()
+        self._start_worker = self._do_start()
 
     @on(Button.Pressed, "#start-btn")
     def _on_start(self) -> None:
@@ -399,6 +402,11 @@ class ContainerUpScreen(Screen):
                 return
         elif selected_id != VER_PINNED:
             use_default_image = True
+
+        from tui.common.widgets import confirm_model_switch
+
+        if not await confirm_model_switch(self, "llamacpp", self.profile_name):
+            return
 
         try:
             conflict = await check_port_conflict(self._profile)

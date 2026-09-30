@@ -169,7 +169,7 @@ def test_llamacpp_profile_env_metrics_and_conflicts_are_documented() -> None:
     assert "llmux always enables the metrics endpoint" in configs
     assert "cannot override llmux-managed server options" in configs
     assert "Port conflicts and failed port probes block startup" in tui
-    assert "Only GPU overlap offers <strong>Start anyway</strong>" in tui
+    assert "offers <strong>Stop and start</strong>" in tui
 
 
 def test_manual_secret_files_use_owner_only_permissions() -> None:
@@ -212,7 +212,7 @@ def test_failure_and_input_security_contracts_are_documented() -> None:
     assert "<code>df_target</code>" in cli_reference
     assert "HTTP polling failure displays <code>error</code>" in tui
     assert "the command exits 2 because the target is unknown" in tui
-    assert "only a confirmed GPU overlap" in architecture
+    assert "rechecks the approved targets" in architecture
     assert "HTTP(S) URL containing userinfo, a query, or a fragment is rejected" in dev_build
     assert "Docker image inputs reject URL schemes" in cli_reference
     assert "pagination safety cap is reached" in tui
