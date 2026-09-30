@@ -141,7 +141,7 @@ async def test_authenticated_http_requests_keep_the_key_out_of_urls():
 
     response = MagicMock()
     response.__enter__.return_value.read.return_value = b'{"data":[{"id":"model"}],"usage":{"completion_tokens":1}}'
-    with patch("urllib.request.urlopen", return_value=response) as request:
+    with patch.object(http, "open_url", return_value=response) as request:
         assert await http.list_served_models(8000, api_key="secret") == ["model"]
         await http.chat_completion_bench(8000, "model", api_key="secret")
     for call in request.call_args_list:
@@ -156,7 +156,7 @@ async def test_readiness_authentication_and_error_protocol(backend):
     runtime = importlib.import_module(f"tui.backends.{backend}.backend_runtime")
     response = MagicMock()
     response.__enter__.return_value.read.return_value = b'{"data":[{"id":"model"}]}'
-    with patch("urllib.request.urlopen", return_value=response) as request:
+    with patch.object(runtime, "open_url", return_value=response) as request:
         assert await runtime._models_endpoint_ready(8000, api_key="secret")
         assert request.call_args.args[0].get_header("Authorization") == "Bearer secret"
     with patch.object(runtime, "load_config", side_effect=ValueError("invalid config")):

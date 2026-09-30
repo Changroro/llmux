@@ -168,43 +168,28 @@ class ConfigFormDisableSwitchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("max-model-len", cfg.extra_params)
 
 
-class ConfigFlagImageSelectionTests(unittest.TestCase):
-    def test_vllm_config_uses_referencing_profile_image(self) -> None:
-        from types import SimpleNamespace
-        from tui.backends.vllm.screens import config as screen_module
+class ConfigFlagImageSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selected_profile_keeps_its_runtime_context(self) -> None:
+        from tui.common import flag_discovery
 
-        screen = screen_module.ConfigFormScreen("cfg")
-        profile = SimpleNamespace(config_name="cfg", image_tag="custom/vllm:v1")
-        with patch.object(screen_module, "list_profile_names", return_value=["p"]), \
-            patch.object(screen_module, "load_profile", return_value=profile):
-            self.assertEqual(screen._profile_image(), "custom/vllm:v1")
+        with patch.object(flag_discovery, "profile_target", AsyncMock(return_value=("sha256:actual", "p"))) as resolve:
+            self.assertEqual(await flag_discovery.config_target("vllm", "shared", "p"), ("sha256:actual", "p"))
+        resolve.assert_awaited_once_with("vllm", "p")
 
-    def test_llamacpp_config_rejects_ambiguous_profile_images(self) -> None:
-        from types import SimpleNamespace
-        from tui.backends.llamacpp.screens import config as screen_module
+    async def test_config_rejects_ambiguous_runtime_images(self) -> None:
+        from tui.common import flag_discovery, profile_store
 
-        screen = screen_module.ConfigFormScreen("cfg")
-        profiles = {
-            "a": SimpleNamespace(config_name="cfg", image_tag="custom/llama:a"),
-            "b": SimpleNamespace(config_name="cfg", image_tag="custom/llama:b"),
-        }
-        with patch.object(
-            screen_module, "list_profile_names", return_value=["a", "b"]
-        ), patch.object(
-            screen_module, "load_profile", side_effect=lambda name: profiles[name]
-        ):
+        profiles = [profile_store.StoredProfile(name=name, backend="llamacpp", config_name="cfg") for name in ("a", "b")]
+        with patch.object(profile_store, "list_profiles", return_value=profiles), patch.object(flag_discovery, "profile_target", AsyncMock(side_effect=[("sha256:a", "a"), ("sha256:b", "b")])):
             with self.assertRaisesRegex(RuntimeError, "multiple images"):
-                screen._profile_image()
+                await flag_discovery.config_target("llamacpp", "cfg")
 
-    def test_new_config_does_not_inherit_an_unlinked_profile_image(self) -> None:
-        from types import SimpleNamespace
-        from tui.backends.vllm.screens import config as screen_module
+    async def test_new_config_does_not_inherit_an_unlinked_profile_image(self) -> None:
+        from tui.common import flag_discovery
 
-        screen = screen_module.ConfigFormScreen()
-        profile = SimpleNamespace(config_name="", image_tag="custom/vllm:old")
-        with patch.object(screen_module, "list_profile_names", return_value=["p"]), \
-            patch.object(screen_module, "load_profile", return_value=profile):
-            self.assertEqual(screen._profile_image(), "")
+        with patch.object(flag_discovery, "profile_target", AsyncMock()) as resolve:
+            self.assertEqual(await flag_discovery.config_target("vllm", ""), ("", ""))
+        resolve.assert_not_awaited()
 
 
 class ConfigFlagIsolationTests(unittest.IsolatedAsyncioTestCase):

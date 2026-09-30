@@ -128,7 +128,7 @@
           <td>Optional</td>
           <td><em>(empty)</em></td>
           <td>vLLM</td>
-          <td>Image used to extract vLLM flags for config autocomplete.</td>
+          <td>Image override for direct Docker Compose use; llmux uses the profile's runtime image.</td>
         </tr>
         <tr>
           <td><code>VLLM_USE_V2_MODEL_RUNNER</code></td>
@@ -225,7 +225,7 @@ PREPARE_MAX_WORKERS=</code></pre>
     <pre data-lang="ini"><code>VLLM_VERSION=v0.20.1</code></pre>
 
     <h3 id="vllm-image"><code>VLLM_IMAGE</code></h3>
-    <p>Optional image reference used when llmux extracts the installed <code>vllm serve</code> flag set for config autocomplete. It does not choose the serving image; set a profile's <code>image_tag</code> for that.</p>
+    <p>This variable no longer selects the autocomplete image. Autocomplete queries the running profile's container directly, or the image selected for its next startup when stopped. Set a profile's <code>image_tag</code> to pin that image; use <code>llmux config flags --image IMAGE</code> for an explicit image query.</p>
     <pre data-lang="ini"><code>VLLM_IMAGE=registry.example.com/team/vllm:v0.20.1</code></pre>
 
     <h3 id="vllm-use-v2-model-runner"><code>VLLM_USE_V2_MODEL_RUNNER</code></h3>

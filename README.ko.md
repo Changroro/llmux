@@ -82,7 +82,7 @@ llmux는 이 둘을 Docker Compose 위의 Textual 대시보드 하나로 묶습�
 - **VRAM을 아는 vLLM recipe import** &mdash; 모델의 공식 [vllm-project/recipes](https://github.com/vllm-project/recipes) 설정을 가져와, 정밀도 변형(bf16 / fp8 / awq)이 실제 내 GPU VRAM에 맞는지 확인한 뒤 씁니다. 80GB 카드에서 검증된 recipe가 16GB에서 조용히 넘치는 일을 막습니다.
 - **메모리 추정** &mdash; HF 모델을 넣으면 다운로드나 실행 전에 GPU별 fit 바를 보여줍니다 ([`hf-mem`](https://github.com/alvarobartt/hf-mem)).
 - **엔진 플래그를 1:1로** &mdash; `config/<backend>/<name>.yaml`이 엔진 플래그에 그대로 대응합니다. 샘플링, context 길이, KV 캐시 정밀도, MoE CPU offload 등. 플래그는 **지우지 않고 켜고 끌 수 있고**, 손으로 쓴 주석도 편집 후 그대로 남습니다.
-- **실제 이미지에서 뽑은 플래그 자동완성** &mdash; config 편집기가 지금 쓰는 `vllm serve` / `llama-server` 이미지의 실제 플래그 목록에서 이름을 자동완성합니다. 한 번 추출해 버전별로 캐시하므로, 제안이 실제로 띄우는 엔진 빌드와 정확히 맞습니다.
+- **실행 중인 서버에서 읽는 플래그 자동완성** &mdash; 선택한 컨테이너 안의 `vllm serve` / `llama-server`에서 직접 인자를 읽으므로 일회성 이미지 선택도 반영합니다. 중지된 프로필은 다음 기동 이미지를 조회하고 이미지 ID별로 캐시합니다. 조회에 실패하면 미검증 목록을 추천하지 않고 자동완성을 중단합니다.
 - **LoRA·speculative/MTP 구성** &mdash; LoRA 모듈은 프로필 항목이라 베이스 모델 위에 얹어 서빙되고, speculative decoding 파라미터는 일반 config 파라미터입니다. 그 구성에 필요한 이미지를 프로필에 고정해서 씁니다.
 - **벤치마크** &mdash; `llmux bench`가 warmup + 중앙값으로 돌려, 같은 하드웨어에서 quant A와 B를 비교합니다.
 - **btop 스타일 라이브 모니터** &mdash; TUI에서 `v`, 또는 TUI 없이 `llmux top`. GPU는 항상 전부 보이고(util·mem·temp·power·PCIe heat bar), 실행 중인 모델마다 패널이 붙어 처리량·KV braille 그래프, 캐시 적중, 요청, TTFT·E2E percentile(p50/p95/p99)과 prefill/decode 구간을 보여줍니다. 엔진이 노출하지 않는 지표는 지어내지 않고 `—`로 둡니다.

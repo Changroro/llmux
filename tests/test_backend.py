@@ -2480,9 +2480,9 @@ class DynamicFlagImageTests(unittest.IsolatedAsyncioTestCase):
                 params = await inspect.extract_vllm_params("my-vllm:v1")
 
         self.assertEqual(params, {"max-model-len"})
-        self.assertIn("my-vllm:v1", calls[0])
+        self.assertIn("sha256:v1", calls[0])
 
-    async def test_vllm_configured_image_is_used_without_local_official_tag(self) -> None:
+    async def test_vllm_default_discovery_uses_next_startup_image(self) -> None:
         from tui.backends.vllm import backend_inspect as inspect
 
         calls: list[tuple[str, ...]] = []
@@ -2493,14 +2493,14 @@ class DynamicFlagImageTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(inspect, "_VLLM_PARAMS_CACHE_DIR", Path(tmp)), \
-                patch.object(inspect, "_configured_vllm_image", return_value="custom/vllm:v1"), \
+                patch("tui.backends.vllm.backend_runtime._resolve_prepare_image", AsyncMock(return_value=("custom/vllm:v1", ""))), \
                 patch.object(inspect, "get_local_latest_tag", AsyncMock(return_value="none")), \
                 patch.object(inspect, "run_command", fake_run), \
                 patch("tui.common.docker.image_identity", AsyncMock(return_value="sha256:v1")):
                 params = await inspect.extract_vllm_params()
 
         self.assertEqual(params, {"max-model-len"})
-        self.assertIn("custom/vllm:v1", calls[0])
+        self.assertIn("sha256:v1", calls[0])
 
     async def test_vllm_custom_images_use_separate_cache_entries(self) -> None:
         from tui.backends.vllm import backend_inspect as inspect
@@ -2508,7 +2508,7 @@ class DynamicFlagImageTests(unittest.IsolatedAsyncioTestCase):
         calls: list[str] = []
 
         async def fake_run(*args, **_kwargs):
-            image = args[5]
+            image = args[6]
             calls.append(image)
             value = "flag-a" if image.endswith(":a") else "flag-b"
             return 0, json.dumps([value])
@@ -2527,7 +2527,7 @@ class DynamicFlagImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, {"flag-a"})
         self.assertEqual(second, {"flag-b"})
         self.assertEqual(cached, {"flag-a"})
-        self.assertEqual(calls, ["custom/vllm:a", "custom/vllm:b"])
+        self.assertEqual(calls, ["sha256:a", "sha256:b"])
 
     async def test_llamacpp_flag_discovery_uses_explicit_profile_image(self) -> None:
         calls: list[tuple[str, ...]] = []
@@ -2551,7 +2551,7 @@ class DynamicFlagImageTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(flags, {"ctx-size", "n-gpu-layers"})
-        self.assertIn("custom/llama:v1", calls[0])
+        self.assertIn("sha256:v1", calls[0])
 
     async def test_vllm_moving_tag_cache_changes_with_image_identity(self) -> None:
         from tui.backends.vllm import backend_inspect as inspect

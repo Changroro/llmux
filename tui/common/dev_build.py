@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
+
 import asyncio
 import os
 import re
@@ -371,18 +373,17 @@ async def clone_or_update(spec: DevBuildSpec, repo_url: str, branch: str):
                     return
 
         if not spec.src_dir.exists():
-            async for event in _stream(
-                ["git", "clone", transport_url, str(spec.src_dir)], env=git_env
-            ):
-                if event[0] == "log":
-                    yield ("log", _redact_git_output(str(event[1]), repo_url))
-                    continue
-                if event[0] == "rc":
-                    if event[1] != 0:
-                        yield event
-                        return
-                    continue
-                yield event
+            async with aclosing(_stream(['git', 'clone', transport_url, str(spec.src_dir)], env=git_env)) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "log":
+                        yield ("log", _redact_git_output(str(event[1]), repo_url))
+                        continue
+                    if event[0] == "rc":
+                        if event[1] != 0:
+                            yield event
+                            return
+                        continue
+                    yield event
 
         rc, out = await _run(
             "git", "fetch", "origin", cwd=spec.src_dir, timeout=120, env=git_env
@@ -509,13 +510,14 @@ async def stream_build(
     yield ("log", f"Tag: {spec.image_prefix}:{main_tag}")
 
     commit_hash = ""
-    async for event in clone_or_update(spec, resolved_repo, resolved_branch):
-        if event[0] == "commit":
-            commit_hash = event[1]
-        else:
-            yield event
-            if event[0] == "rc" and event[1] != 0:
-                return
+    async with aclosing(clone_or_update(spec, resolved_repo, resolved_branch)) as _owned_stream:
+        async for event in _owned_stream:
+            if event[0] == "commit":
+                commit_hash = event[1]
+            else:
+                yield event
+                if event[0] == "rc" and event[1] != 0:
+                    return
 
     dockerfile_path = spec.src_dir / spec.dockerfile_relpath if spec.dockerfile_relpath else None
     if dockerfile_path and not dockerfile_path.exists():
@@ -558,11 +560,12 @@ async def stream_build(
 
     build_env = os.environ.copy()
     build_env.setdefault("DOCKER_BUILDKIT", "1")
-    async for event in _stream(cmd, env=build_env):
-        if event[0] == "rc" and event[1] != 0:
+    async with aclosing(_stream(cmd, env=build_env)) as _owned_stream:
+        async for event in _owned_stream:
+            if event[0] == "rc" and event[1] != 0:
+                yield event
+                return
             yield event
-            return
-        yield event
 
 
 async def detect_local_gpu_caps() -> list[str]:

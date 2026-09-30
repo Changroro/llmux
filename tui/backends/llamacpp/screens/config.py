@@ -26,6 +26,7 @@ from tui.backends.llamacpp.backend import (
     validate_name,
 )
 from tui.common import profile_store
+from tui.common.flag_discovery import config_target
 from tui.common.i18n import t
 from tui.common.widgets import TextPromptModal
 
@@ -209,9 +210,10 @@ class ConfigFormScreen(ModalScreen[str | None]):
     }
     """
 
-    def __init__(self, config_name: str = "") -> None:
+    def __init__(self, config_name: str = "", *, profile_name: str = "") -> None:
         super().__init__()
         self._config_name = config_name
+        self._profile_name = profile_name
         self._edit_mode = bool(config_name)
         # The name field stays editable in edit mode: a changed name is a
         # rename, and _original_name is what tells the two apart at save time.
@@ -220,7 +222,7 @@ class ConfigFormScreen(ModalScreen[str | None]):
         self._initial_config: Config | None = None
         self._initial_text: str | None = None
         self._saved_name: str | None = None
-        self._known_flags = set(LLAMA_SERVER_FLAGS)
+        self._known_flags: set[str] = set()
         self._flag_suggester = SuggestFromList(
             sorted(self._known_flags), case_sensitive=False
         )
@@ -276,26 +278,15 @@ class ConfigFormScreen(ModalScreen[str | None]):
                 self._add_param_row(key, ex)
         self._load_server_flags()
 
-    def _profile_image(self) -> str:
-        if not self._config_name:
-            return ""
-        images = {
-            load_profile(name).image_tag or ""
-            for name in list_profile_names()
-            if load_profile(name).config_name == self._config_name
-        }
-        if len(images) > 1:
-            raise RuntimeError(
-                f"config '{self._config_name}' is used with multiple images; "
-                "flag discovery requires one image"
-            )
-        return next(iter(images), "")
-
     @work(exclusive=False)
     async def _load_server_flags(self) -> None:
         try:
-            extracted = await extract_llama_server_flags(self._profile_image())
-        except RuntimeError as exc:
+            image, container = await config_target("llamacpp", self._config_name, self._profile_name)
+            extracted = await extract_llama_server_flags(image, **({"container_name": container} if container else {}))
+            if not extracted:
+                raise RuntimeError("image returned no supported parameters")
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.query_one("#params-hint", Static).update(t("Flag lookup failed; autocomplete unavailable.", "인자 조회 실패: 자동완성을 사용할 수 없습니다."))
             self.notify(
                 t(
                     f"Could not inspect llama.cpp flags: {exc}",
@@ -305,6 +296,7 @@ class ConfigFormScreen(ModalScreen[str | None]):
             )
             return
         if extracted:
+            self.query_one("#params-hint", Static).update(t(f"Parameters: {container or image or 'next startup image'}", f"인자 기준: {container or image or '다음 기동 이미지'}"))
             self._known_flags = set(extracted)
             self._flag_suggester = SuggestFromList(
                 sorted(self._known_flags), case_sensitive=False
@@ -417,7 +409,7 @@ class ConfigFormScreen(ModalScreen[str | None]):
                 return
             (params if switch.value else disabled_params)[key] = parsed
 
-        unknown = [k for k in params if k not in self._known_flags]
+        unknown = [k for k in params if k not in self._known_flags and k not in {"model-file", "extra-args"}] if self._known_flags else []
         if unknown:
             self.notify(
                 t(

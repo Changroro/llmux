@@ -195,7 +195,8 @@ class CliSmokeTests(unittest.TestCase):
         for backend, image, prefix, flags in cases:
             with self.subTest(backend=backend):
                 identity = f"sha256:{backend}"
-                digest = hashlib.sha256(f"{image}@{identity}".encode()).hexdigest()[:16]
+                version = "full-help-v2:" if backend == "vllm" else ""
+                digest = hashlib.sha256(f"{version}{image}@{identity}".encode()).hexdigest()[:16]
                 cache = self.tmp / "config" / backend / f"{prefix}{digest}.json"
                 cache.write_text(json.dumps(flags))
                 try:

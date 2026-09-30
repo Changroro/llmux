@@ -537,7 +537,7 @@ class DashboardScreen(Screen):
             p = vbackend.load_profile(name)
             cfg = p.config_name or name
             self.app.push_screen(
-                ConfigFormScreen(config_name=cfg), self._after_mutation
+                ConfigFormScreen(config_name=cfg, profile_name=name), self._after_mutation
             )
         elif action == "delete":
             if row.running:
@@ -647,7 +647,7 @@ class DashboardScreen(Screen):
             from tui.backends.llamacpp.screens.config import ConfigFormScreen
 
             self.app.push_screen(
-                ConfigFormScreen(profile.config_name or name), self._after_mutation
+                ConfigFormScreen(profile.config_name or name, profile_name=name), self._after_mutation
             )
         elif action == "edit-profile":
             from tui.backends.llamacpp.screens.profile import ProfileFormScreen

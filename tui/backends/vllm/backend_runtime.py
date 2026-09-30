@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
+
 import asyncio
 import errno
 import json
@@ -9,6 +11,7 @@ import os
 import re
 import socket
 import urllib.request
+from tui.common.ssl_ctx import open_url
 from urllib.parse import urlsplit
 
 import yaml
@@ -359,13 +362,9 @@ async def _stream_build_dev_image(
             "Another dev build is already running. Waiting for it to finish...",
         )
     async with _BUILD_LOCK:
-        async for event in _do_build_dev_image(
-            branch,
-            repo_url=repo_url,
-            custom_tag=custom_tag,
-            use_official=use_official,
-        ):
-            yield event
+        async with aclosing(_do_build_dev_image(branch, repo_url=repo_url, custom_tag=custom_tag, use_official=use_official)) as _owned_stream:
+            async for event in _owned_stream:
+                yield event
 
 
 VLLM_DEV_SPEC = dev_build.DevBuildSpec(
@@ -418,17 +417,9 @@ async def _do_build_dev_image(
         ok, msg = _force_local_arch_for_deepep(VLLM_SRC_DIR / "docker/Dockerfile")
         return ok, msg
 
-    async for event in dev_build.stream_build(
-        VLLM_DEV_SPEC,
-        branch,
-        repo_url=repo_url,
-        custom_tag=custom_tag,
-        extra_build_args=tuple(extra_build_args),
-        extra_log_lines=tuple(extra_log),
-        pre_build=_patch,
-        extra_labels=(("vllm.build.type", "official" if use_official else "fast"),),
-    ):
-        yield event
+    async with aclosing(dev_build.stream_build(VLLM_DEV_SPEC, branch, repo_url=repo_url, custom_tag=custom_tag, extra_build_args=tuple(extra_build_args), extra_log_lines=tuple(extra_log), pre_build=_patch, extra_labels=(('vllm.build.type', 'official' if use_official else 'fast'),))) as _owned_stream:
+        async for event in _owned_stream:
+            yield event
 
 
 async def _dev_image_matches(image_tag: str, repo_url: str, branch: str) -> bool:
@@ -524,7 +515,7 @@ async def _models_endpoint_ready(port: str, timeout: int = 3, *, api_key: str = 
                 f"http://127.0.0.1:{port}/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             )
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with open_url(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
             data = payload.get("data", [])
             return any(isinstance(item, dict) and item.get("id") for item in data)
@@ -875,17 +866,14 @@ async def stream_container_up(
                 )
             else:
                 yield ("log", "Dev image not found. Building first...")
-            async for event in _stream_build_dev_image(
-                resolved_branch,
-                repo_url=resolved_repo_url,
-                custom_tag=image_tag if tag else "",
-            ):
-                if event[0] == "rc":
-                    if int(event[1]) != 0:
-                        yield event
-                        return
-                    continue
-                yield event
+            async with aclosing(_stream_build_dev_image(resolved_branch, repo_url=resolved_repo_url, custom_tag=image_tag if tag else '')) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "rc":
+                        if int(event[1]) != 0:
+                            yield event
+                            return
+                        continue
+                    yield event
 
         yield ("log", f"Using image: {VLLM_DEV_SPEC.image_prefix}:{image_tag}")
         env = _compose_env(profile, use_dev=True, image_tag=image_tag)
@@ -977,7 +965,12 @@ async def stream_container_up(
             yield ("rc", 1)
             return
         if version_tag == "none":
-            release_version = await get_dockerhub_release_version()
+            try:
+                release_version = await get_dockerhub_release_version()
+            except RuntimeError as exc:
+                yield ("log", f"Error: could not resolve the release image — {exc}")
+                yield ("rc", 1)
+                return
             if release_version == "unknown":
                 yield (
                     "log",
@@ -991,6 +984,19 @@ async def stream_container_up(
             resolved_remote_release = True
 
         image_ref = explicit_image_ref or f"vllm/vllm-openai:{version_tag}"
+        local_dev = image_ref.startswith(f"{VLLM_DEV_SPEC.image_prefix}:")
+        if local_dev:
+            dev_tag = image_ref.split(":", 1)[1]
+            try:
+                exists = await dev_build.image_exists_locally(VLLM_DEV_SPEC, dev_tag)
+            except RuntimeError as exc:
+                yield ("log", f"Error: Docker image probe failed — {exc}")
+                yield ("rc", 1)
+                return
+            if not exists:
+                yield ("log", f"Error: Dev image {image_ref} not found locally. Build it first: llmux image build-dev --backend vllm --tag {dev_tag}")
+                yield ("rc", 1)
+                return
         yield ("log", f"Using image: {image_ref}")
         if explicit_image_ref:
             env = _compose_env(
@@ -1008,44 +1014,47 @@ async def stream_container_up(
             "up",
             "-d",
         ]
-        if pull or version_tag == "nightly":
+        if local_dev:
+            compose_cmd.extend(["--pull", "never"])
+        elif pull or version_tag == "nightly":
             compose_cmd.extend(["--pull", "always"])
         elif tag or resolved_remote_release:
             compose_cmd.extend(["--pull", "missing"])
         else:
             compose_cmd.extend(["--pull", "never"])
 
-    async for event in stream_command(compose_cmd, cwd=SCRIPT_DIR, env=env):
-        if event[0] != "rc":
-            yield event
-            continue
+    async with aclosing(stream_command(compose_cmd, cwd=SCRIPT_DIR, env=env)) as _owned_stream:
+        async for event in _owned_stream:
+            if event[0] != "rc":
+                yield event
+                continue
 
-        rc = int(event[1])
-        if rc != 0:
-            yield ("rc", rc)
+            rc = int(event[1])
+            if rc != 0:
+                yield ("rc", rc)
+                return
+
+            ok = False
+            val_messages: list[str] = []
+            async with aclosing(_post_start_validation(profile, hf_cache_path=env.get('HF_CACHE_PATH') or None)) as _owned_stream:
+                async for ev in _owned_stream:
+                    if ev[0] == "result":
+                        ok, val_messages = ev[1], ev[2]
+                    else:
+                        yield ev
+            for message in val_messages:
+                yield ("log", message)
+            if not ok:
+                yield ("rc", 1)
+                return
+
+            yield ("log", f"{profile.name} started successfully!")
+            if not use_dev:
+                async with aclosing(_verify_vllm_version(profile.container_name, version_tag)) as _owned_stream:
+                    async for evt in _owned_stream:
+                        yield evt
+            yield ("rc", 0)
             return
-
-        ok = False
-        val_messages: list[str] = []
-        async for ev in _post_start_validation(
-            profile, hf_cache_path=env.get("HF_CACHE_PATH") or None
-        ):
-            if ev[0] == "result":
-                ok, val_messages = ev[1], ev[2]
-            else:
-                yield ev
-        for message in val_messages:
-            yield ("log", message)
-        if not ok:
-            yield ("rc", 1)
-            return
-
-        yield ("log", f"{profile.name} started successfully!")
-        if not use_dev:
-            async for evt in _verify_vllm_version(profile.container_name, version_tag):
-                yield evt
-        yield ("rc", 0)
-        return
 
 
 async def _resolve_prepare_image(profile: Profile) -> tuple[str, str]:
@@ -1066,7 +1075,10 @@ async def _resolve_prepare_image(profile: Profile) -> tuple[str, str]:
         return "", f"could not list local vLLM images — {exc}"
     if version_tag != "none":
         return f"vllm/vllm-openai:{version_tag}", ""
-    release = await get_dockerhub_release_version()
+    try:
+        release = await get_dockerhub_release_version()
+    except RuntimeError as exc:
+        return "", f"could not resolve the release image — {exc}"
     if release == "unknown":
         return "", (
             "no local versioned vllm/vllm-openai image and DockerHub is "
@@ -1143,14 +1155,15 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
             yield ("log", f"  uv run llmux image build-dev --backend vllm --tag {dev_tag}")
             yield ("rc", 1)
             return
-        async for event in prepare.stream_pull(image_ref):
-            if event[0] == "rc":
-                if int(event[1]) != 0:
-                    yield ("log", f"Error: could not pull {image_ref}")
-                    yield ("rc", int(event[1]))
-                    return
-            else:
-                yield event
+        async with aclosing(prepare.stream_pull(image_ref)) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    if int(event[1]) != 0:
+                        yield ("log", f"Error: could not pull {image_ref}")
+                        yield ("rc", int(event[1]))
+                        return
+                else:
+                    yield event
     yield ("log", f"▸ Image: {image_ref}")
 
     if model.startswith("/") or model.startswith("~"):
@@ -1168,19 +1181,12 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
 
     yield ("log", f"▸ Downloading {model} into {cache_path}")
     rc = -1
-    async for event in prepare.stream_vllm_download(
-        image_ref=image_ref,
-        model_id=model,
-        revision=config.extra_params.get("revision") or "",
-        cache_path=cache_path,
-        token=prepare.hf_token(),
-        container_name=prepare.prepare_container_name(profile.container_name),
-        max_workers=max_workers,
-    ):
-        if event[0] == "rc":
-            rc = int(event[1])
-        else:
-            yield event
+    async with aclosing(prepare.stream_vllm_download(image_ref=image_ref, model_id=model, revision=config.extra_params.get('revision') or '', cache_path=cache_path, token=prepare.hf_token(), container_name=prepare.prepare_container_name(profile.container_name), max_workers=max_workers)) as _owned_stream:
+        async for event in _owned_stream:
+            if event[0] == "rc":
+                rc = int(event[1])
+            else:
+                yield event
     if rc != 0:
         yield ("log", f"✗ Download failed (rc={rc}).")
         yield ("rc", rc if rc != 0 else 1)

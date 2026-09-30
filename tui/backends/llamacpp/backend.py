@@ -371,7 +371,7 @@ def format_config_param_value(value: Any) -> str:
     return str(value)
 
 
-async def extract_llama_server_flags(image_ref: str = "") -> set[str]:
+async def extract_llama_server_flags(image_ref: str = "", *, container_name: str = "") -> set[str]:
     if image_ref:
         image = image_ref
     else:
@@ -384,7 +384,7 @@ async def extract_llama_server_flags(image_ref: str = "") -> set[str]:
         raise RuntimeError(error)
     from tui.common.docker import image_identity
 
-    identity = await image_identity(image)
+    identity = await image_identity(image) if not container_name else None
     cache_file = None
     if identity is not None:
         cache_key = hashlib.sha256(f"{image}@{identity}".encode()).hexdigest()[:16]
@@ -405,20 +405,28 @@ async def extract_llama_server_flags(image_ref: str = "") -> set[str]:
             raise RuntimeError(f"invalid llama.cpp flag cache {cache_file}: {exc}") from exc
     proc = None
     try:
+        command = (
+            ["docker", "exec", container_name, "/app/llama-server", "--help"]
+            if container_name else
+            ["docker", "run", "--rm", "--pull=never", "--entrypoint", "/app/llama-server", identity or image, "--help"]
+        )
         proc = await asyncio.create_subprocess_exec(
-            "docker", "run", "--rm", "--entrypoint", "/app/llama-server",
-            image, "--help",
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
     except asyncio.TimeoutError:
-        if proc is not None:
-            proc.kill()
-            await proc.wait()
         raise RuntimeError(f"timed out inspecting llama.cpp flags from {image}")
     except FileNotFoundError as exc:
         raise RuntimeError("docker is not installed or not available in PATH") from exc
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     if proc.returncode not in (0, 1):
         raise RuntimeError(
             f"could not inspect llama.cpp flags from {image}: docker exited "
@@ -432,7 +440,7 @@ async def extract_llama_server_flags(image_ref: str = "") -> set[str]:
             flags.add(flag)
     if not flags:
         raise RuntimeError(f"could not parse llama.cpp flags from {image}")
-    if identity is None:
+    if identity is None and not container_name:
         identity = await image_identity(image)
         if identity is not None:
             cache_key = hashlib.sha256(f"{image}@{identity}".encode()).hexdigest()[:16]

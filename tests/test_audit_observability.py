@@ -113,14 +113,14 @@ class HttpProbeTests(unittest.IsolatedAsyncioTestCase):
         from tui.common import http
 
         response = self._Response(b'{"data": []}')
-        with patch.object(http.urllib.request, "urlopen", return_value=response):
+        with patch.object(http, "open_url", return_value=response):
             self.assertEqual(await http.list_served_models(8000), [])
 
     async def test_model_discovery_failure_raises(self) -> None:
         from tui.common import http
 
         with patch.object(
-            http.urllib.request, "urlopen", side_effect=OSError("connection refused")
+            http, "open_url", side_effect=OSError("connection refused")
         ):
             with self.assertRaisesRegex(RuntimeError, "model discovery failed"):
                 await http.list_served_models(8000)

@@ -234,7 +234,7 @@ async def test_vllm_flag_cache_rejects_string_root(tmp_path: Path) -> None:
 
     image = "custom/vllm:v1"
     identity = "sha256:one"
-    key = hashlib.sha256(f"{image}@{identity}".encode()).hexdigest()[:16]
+    key = hashlib.sha256(f"full-help-v2:{image}@{identity}".encode()).hexdigest()[:16]
     (tmp_path / f".vllm-params-{key}.json").write_text(json.dumps("max-model-len"))
     with patch.object(backend_inspect, "_VLLM_PARAMS_CACHE_DIR", tmp_path), patch(
         "tui.common.docker.image_identity", AsyncMock(return_value=identity)
@@ -264,6 +264,7 @@ async def test_vllm_flags_are_discovered_from_image_help(tmp_path: Path) -> None
             "docker",
             "run",
             "--rm",
+            "--pull=never",
             "--entrypoint",
             "vllm",
             "custom/vllm:v1",
