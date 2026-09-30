@@ -87,8 +87,13 @@ def up(
         help="Allow a detected GPU overlap. Port conflicts and failed port probes "
              "always abort.",
     ),
+    replace: bool = typer.Option(
+        False, "--replace", help="Stop llmux models sharing this profile's GPUs before starting it.",
+    ),
 ) -> None:
     """Start a profile's container. Streams compose output to stdout."""
+    if replace and force:
+        raise typer.BadParameter("--replace and --force are mutually exclusive")
     if dev and default_image:
         typer.echo(
             "Error: --dev and --default-image are mutually exclusive (one forces a "
@@ -125,6 +130,16 @@ def up(
             raise typer.Exit(code=2)
 
     try:
+        if replace:
+            from tui.common.model_switch import plan_switch, stop_switch_sources
+
+            async def replace_models():
+                target, sources = await plan_switch(bk, profile)
+                if sources:
+                    typer.echo("Stopping: " + ", ".join(f"{p.backend}/{p.name}" for p in sources))
+                    await stop_switch_sources(target, sources)
+
+            run_async(replace_models())
         warnings = run_async(gather_conflict_warnings(profile, bk))
     except Exception as exc:
         typer.echo(f"Conflict pre-flight failed: {exc}", err=True)

@@ -168,6 +168,7 @@ class ContainerUpScreen(Screen):
         self.profile_name = profile_name
         self._profile = load_profile(profile_name)
         self._gpu_timer = None
+        self._start_worker = None
         self._local_tag: str = ""
         self._release_version: str = ""
         self._version_retries: int = 0
@@ -416,6 +417,8 @@ class ContainerUpScreen(Screen):
         unless Custom/Dev still need their inputs filled, in which case focus
         the input instead.
         """
+        if self._start_worker is not None and not self._start_worker.is_finished:
+            return
         try:
             if str(self.query_one("#version-scroll").styles.display) == "none":
                 return  # already started — the version UI is hidden
@@ -449,7 +452,7 @@ class ContainerUpScreen(Screen):
         if pressed.id == VER_DEV and not self.query_one("#dev-repo-input", Input).value.strip():
             self.query_one("#dev-repo-input", Input).focus()
             return
-        self._do_start()
+        self._start_worker = self._do_start()
 
     @work(exclusive=True)
     async def _do_start(self) -> None:
@@ -522,6 +525,11 @@ class ContainerUpScreen(Screen):
             if not tag:
                 self.app.notify(t("Please enter a custom tag.", "커스텀 태그를 입력하세요."), severity="error")
                 return
+
+        from tui.common.widgets import confirm_model_switch
+
+        if not await confirm_model_switch(self, "vllm", self.profile_name):
+            return
 
         # Always keep the runtime bind check enabled right before compose up.
         try:

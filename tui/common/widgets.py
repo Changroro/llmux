@@ -13,6 +13,32 @@ from tui.common.dev_build import repo_url_error
 from tui.common.i18n import t
 
 
+async def confirm_model_switch(screen, backend: str, name: str) -> bool:
+    from tui.common.model_switch import plan_switch, stop_switch_sources
+
+    try:
+        target, sources = await plan_switch(backend, name)
+        if not sources:
+            return True
+        names = ", ".join(f"{p.backend}/{p.name}" for p in sources)
+        confirmed = await screen.app.push_screen_wait(ConfirmModal(
+            t(
+                f"Stop {names} and start {name}?\nActive requests will be interrupted.\nIf the new model fails, the old models stay stopped.",
+                f"{names}을(를) 중지하고 {name}을(를) 시작할까요?\n진행 중인 요청이 중단됩니다.\n새 모델 기동이 실패하면 기존 모델은 중지된 상태로 남습니다.",
+            ),
+            confirm_label=t("Stop and start", "중지 후 시작"),
+            variant="warning",
+        ))
+        if not confirmed:
+            return False
+        screen.notify(t(f"Stopping {names}…", f"{names} 중지 중…"))
+        await stop_switch_sources(target, sources)
+        return True
+    except (OSError, RuntimeError, ValueError) as exc:
+        screen.notify(t(f"Model switch aborted: {exc}", f"모델 교체 중단: {exc}"), severity="error", timeout=10)
+        return False
+
+
 class BackendPickerModal(ModalScreen[str]):
     """새 프로필 생성 시 backend 선택 모달. 반환값: 'vllm' | 'llamacpp' | ''."""
 

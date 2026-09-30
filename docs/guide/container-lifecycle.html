@@ -91,7 +91,7 @@
       <li><strong>Port conflicts</strong> — the target port is probed against running Docker containers <em>and</em> local processes (a raw socket bind). A static overlap between two <em>stopped</em> profiles is ignored.</li>
       <li><strong>GPU conflicts</strong> — the profile's <code>gpu_id</code> set is compared against every <em>running</em> container from <strong>both</strong> backends. Overlap produces a warning.</li>
     </ul>
-    <p>Port conflicts and failed port probes are hard errors in both interfaces. GPU overlap is the only bypassable conflict: use <code>--force</code> in the CLI or confirm the warning in the TUI.</p>
+    <p>The TUI offers to stop running llmux profiles sharing the selected GPUs before starting a new model. The CLI provides the same replacement sequence with <code>llmux up PROFILE --replace</code>; <code>--force</code> instead allows both models to run together. Port conflicts outside the replacement targets and failed probes block startup. Replacement never stops unmanaged containers or profiles on unrelated GPUs, and a failed stop prevents the new start.</p>
 
     <h3 id="4-compose-up-health-validation">4. compose up + health validation</h3>
     <p>llmux runs <code>docker compose ... up -d</code> with the rendered env files. After compose returns, a post-start validation loop polls <code>docker inspect</code>:</p>

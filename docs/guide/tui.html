@@ -222,7 +222,7 @@ llmux tui      # explicit</code></pre>
 
     <div class="admonition note">
       <p class="admonition-title">Conflict gate before start</p>
-      <p>The dashboard runs a cross-backend port + GPU conflict check before opening the start screen. Port conflicts and failed port probes block startup with a details dialog that must be closed. Only GPU overlap offers <strong>Start anyway</strong>.</p>
+      <p>After you select a version and press Start, llmux lists running profiles sharing the target GPUs and offers <strong>Stop and start</strong>. Confirming stops those models, verifies they have exited, then starts the selected model. Opening or cancelling the version screen leaves existing models running. Port conflicts and failed port probes block startup unless the port belongs to a model being replaced. A failed stop prevents the new model from starting; a failed new start does not restart the old models automatically.</p>
     </div>
 
     <h2 id="profile-and-config-forms">Profile and config forms</h2>
