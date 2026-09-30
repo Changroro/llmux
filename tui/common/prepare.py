@@ -13,6 +13,8 @@ by PREPARE_DOWNLOADER_IMAGE instead.
 
 from __future__ import annotations
 
+from contextlib import aclosing
+
 import asyncio
 import contextlib
 import os
@@ -264,8 +266,9 @@ async def image_present(image_ref: str) -> bool:
 async def stream_pull(image_ref: str):
     """Pull `image_ref`, streaming docker's own progress output."""
     yield ("log", t(f"▸ Pulling image: {image_ref}", f"▸ 이미지 받는 중: {image_ref}"))
-    async for event in stream_lines(["docker", "pull", image_ref]):
-        yield event
+    async with aclosing(stream_lines(['docker', 'pull', image_ref])) as _owned_stream:
+        async for event in _owned_stream:
+            yield event
 
 
 async def stream_vllm_download(
@@ -303,8 +306,9 @@ async def stream_vllm_download(
 
     try:
         stream = stream_lines(args, env=process_env) if process_env else stream_lines(args)
-        async for event in stream:
-            yield event
+        async with aclosing(stream) as _owned_stream:
+            async for event in _owned_stream:
+                yield event
     except (asyncio.CancelledError, GeneratorExit) as exc:
         cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
         if cleanup_rc != 0:
@@ -440,15 +444,16 @@ async def stream_llamacpp_download(
         yield ("rc", 1)
         return
     if not present:
-        async for event in stream_pull(image_ref):
-            if event[0] == "rc":
-                if int(event[1]) != 0:
-                    yield ("log", t(f"✗ could not pull {image_ref}",
-                                    f"✗ downloader 이미지 pull 실패: {image_ref}"))
-                    yield ("rc", int(event[1]))
-                    return
-            else:
-                yield event
+        async with aclosing(stream_pull(image_ref)) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    if int(event[1]) != 0:
+                        yield ("log", t(f"✗ could not pull {image_ref}",
+                                        f"✗ downloader 이미지 pull 실패: {image_ref}"))
+                        yield ("rc", int(event[1]))
+                        return
+                else:
+                    yield event
 
     cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
     if cleanup_rc != 0:
@@ -474,11 +479,12 @@ async def stream_llamacpp_download(
     rc = -1
     try:
         stream = stream_lines(args, env=process_env) if process_env else stream_lines(args)
-        async for event in stream:
-            if event[0] == "rc":
-                rc = int(event[1])
-            else:
-                yield event
+        async with aclosing(stream) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    rc = int(event[1])
+                else:
+                    yield event
     except (asyncio.CancelledError, GeneratorExit) as exc:
         cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
         if cleanup_rc != 0:

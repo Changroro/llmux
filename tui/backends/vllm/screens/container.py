@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -554,29 +556,23 @@ class ContainerUpScreen(Screen):
 
         # Stream backend startup output in real-time
         rc = -1
-        async for msg_type, data in stream_container_up(
-            self.profile_name,
-            use_dev=use_dev,
-            use_default_image=use_default_image,
-            tag=tag,
-            pull=pull,
-            repo_url=repo_url,
-            branch=branch,
-        ):
-            if msg_type == "log":
-                try:
-                    log_widget.write(data)
-                except Exception:
-                    pass
-            elif msg_type == "rc":
-                rc = data
+        async with aclosing(stream_container_up(self.profile_name, use_dev=use_dev, use_default_image=use_default_image, tag=tag, pull=pull, repo_url=repo_url, branch=branch)) as _owned_stream:
+            async for (msg_type, data) in _owned_stream:
+                if msg_type == "log":
+                    try:
+                        log_widget.write(data)
+                    except Exception:
+                        pass
+                elif msg_type == "rc":
+                    rc = data
 
         try:
             if rc == 0:
                 status.update(t("[green bold]Container started. Logs: (Esc/q to close)[/green bold]", "[green bold]컨테이너 시작됨. 로그: (Esc/q 로 닫기)[/green bold]"))
                 try:
-                    async for line in stream_container_logs(self._profile.container_name):
-                        log_widget.write(line)
+                    async with aclosing(stream_container_logs(self._profile.container_name)) as _owned_stream:
+                        async for line in _owned_stream:
+                            log_widget.write(line)
                 except Exception as exc:
                     log_widget.write(t(f"Log stream error: {exc}", f"로그 스트림 오류: {exc}"))
             else:
@@ -662,8 +658,9 @@ class LogScreen(Screen):
         """Stream container logs into the RichLog widget."""
         log_widget = self.query_one(RichLog)
         try:
-            async for line in stream_container_logs(self.container_name):
-                log_widget.write(line)
+            async with aclosing(stream_container_logs(self.container_name)) as _owned_stream:
+                async for line in _owned_stream:
+                    log_widget.write(line)
         except Exception as exc:
             log_widget.write(t(f"\nLog stream error: {exc}", f"\n로그 스트림 오류: {exc}"))
 

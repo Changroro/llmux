@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
+
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -90,14 +92,15 @@ class PrepareScreen(ModalScreen[None]):
 
         log = self.query_one("#prepare-log", RichLog)
         rc = -1
-        async for msg_type, data in stream_container_prepare(self.profile_name):
-            if msg_type == "rc":
-                rc = int(data)
-                continue
-            try:
-                log.write(str(data))
-            except Exception:
-                return
+        async with aclosing(stream_container_prepare(self.profile_name)) as _owned_stream:
+            async for (msg_type, data) in _owned_stream:
+                if msg_type == "rc":
+                    rc = int(data)
+                    continue
+                try:
+                    log.write(str(data))
+                except Exception:
+                    return
 
         try:
             status = self.query_one("#prepare-status", Static)

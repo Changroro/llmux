@@ -6,6 +6,7 @@ import json
 import statistics
 import time
 import urllib.request
+from tui.common.ssl_ctx import open_url
 
 BENCH_PROMPT = "Explain the theory of relativity in about 150 words."
 BENCH_MAX_TOKENS = 200
@@ -90,7 +91,7 @@ async def chat_completion_bench(
             headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {api_key}"} if api_key else {})},
         )
         t0 = time.time()
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with open_url(req, timeout=timeout) as r:
             raw = r.read().decode()
         elapsed = time.time() - t0
         d = json.loads(raw, strict=False)
@@ -169,7 +170,7 @@ async def list_served_models(port: int | str, timeout: int = 5, *, api_key: str 
                 f"http://localhost:{port}/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             )
-            with urllib.request.urlopen(request, timeout=timeout) as r:
+            with open_url(request, timeout=timeout) as r:
                 d = json.loads(r.read())
             if not isinstance(d, dict) or not isinstance(d.get("data"), list):
                 raise ValueError("response must contain a data list")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import aclosing
+
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -429,21 +431,15 @@ class ContainerUpScreen(Screen):
             return
 
         rc = -1
-        async for msg_type, data in stream_container_up(
-            self.profile_name,
-            use_dev=use_dev,
-            use_default_image=use_default_image,
-            tag=tag,
-            repo_url=repo_url,
-            branch=branch,
-        ):
-            if msg_type == "log":
-                try:
-                    log_widget.write(backend.strip_ansi(data))
-                except Exception:
-                    pass
-            elif msg_type == "rc":
-                rc = int(data)
+        async with aclosing(stream_container_up(self.profile_name, use_dev=use_dev, use_default_image=use_default_image, tag=tag, repo_url=repo_url, branch=branch)) as _owned_stream:
+            async for (msg_type, data) in _owned_stream:
+                if msg_type == "log":
+                    try:
+                        log_widget.write(backend.strip_ansi(data))
+                    except Exception:
+                        pass
+                elif msg_type == "rc":
+                    rc = int(data)
 
         try:
             if rc == 0:
@@ -454,10 +450,9 @@ class ContainerUpScreen(Screen):
                     )
                 )
                 try:
-                    async for line in backend.stream_logs(
-                        self._profile.container_name
-                    ):
-                        log_widget.write(backend.strip_ansi(line))
+                    async with aclosing(backend.stream_logs(self._profile.container_name)) as _owned_stream:
+                        async for line in _owned_stream:
+                            log_widget.write(backend.strip_ansi(line))
                 except Exception as exc:
                     log_widget.write(t(f"Log stream error: {exc}", f"로그 스트림 오류: {exc}"))
             else:

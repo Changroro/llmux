@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 VLLM_OFFICIAL_REPO = "vllm/vllm-openai"
-_DOCKERHUB_TAG_PAGE_CAP = 5
+_DOCKERHUB_TAG_PAGE_CAP = 100
 
 
 def resolve_vllm_image_ref(image_tag: str) -> str:
@@ -202,9 +202,13 @@ async def get_dockerhub_release_version() -> str:
         for base_url in base_urls:
             url = base_url
             pages_checked = 0
+            visited: set[str] = set()
             stable_tags: list[tuple[tuple[int, int, int], str]] = []
             failed = False
             while url:
+                if url in visited:
+                    raise RuntimeError("DockerHub pagination repeated a page URL")
+                visited.add(url)
                 if pages_checked >= _DOCKERHUB_TAG_PAGE_CAP:
                     raise RuntimeError("DockerHub pagination exceeded the page limit")
                 data = await _fetch_json_url(url, timeout=5.0)
@@ -277,29 +281,19 @@ def _load_flag_cache(path: Path) -> set[str]:
     return _validate_flags(json.loads(path.read_text()))
 
 
-def _configured_vllm_image() -> str:
-    """VLLM_IMAGE from .env.common, or "" when unset."""
-    from tui.backends.vllm.backend_common import COMMON_ENV
-    from tui.common.env import parse_env_file
-
-    if not COMMON_ENV.exists():
-        return ""
-    return parse_env_file(COMMON_ENV).get("VLLM_IMAGE", "").strip()
 
 
-async def extract_vllm_params(image_tag: str = "") -> set[str]:
+async def extract_vllm_params(image_tag: str = "", *, container_name: str = "") -> set[str]:
     """Extract valid vllm serve parameters from a docker image."""
     if image_tag:
         image_ref = resolve_vllm_image_ref(image_tag)
     else:
-        image_ref = _configured_vllm_image()
-        if not image_ref:
-            local_tag = await get_local_latest_tag()
-            if local_tag == "none":
-                raise RuntimeError(
-                    "no vLLM image is configured or available locally for flag discovery"
-                )
-            image_ref = f"{VLLM_OFFICIAL_REPO}:{local_tag}"
+        from .backend_runtime import _resolve_prepare_image
+        from .backend_common import Profile
+
+        image_ref, error = await _resolve_prepare_image(Profile(name=""))
+        if error:
+            raise RuntimeError(error)
 
     from tui.common.dev_build import image_reference_credential_error
 
@@ -309,10 +303,10 @@ async def extract_vllm_params(image_tag: str = "") -> set[str]:
 
     from tui.common.docker import image_identity
 
-    identity = await image_identity(image_ref)
+    identity = await image_identity(image_ref) if not container_name else None
     cache_file = None
     if identity is not None:
-        cache_key = hashlib.sha256(f"{image_ref}@{identity}".encode()).hexdigest()[:16]
+        cache_key = hashlib.sha256(f"full-help-v2:{image_ref}@{identity}".encode()).hexdigest()[:16]
         cache_file = _VLLM_PARAMS_CACHE_DIR / f".vllm-params-{cache_key}.json"
     if cache_file is not None and cache_file.exists():
         try:
@@ -320,17 +314,14 @@ async def extract_vllm_params(image_tag: str = "") -> set[str]:
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise RuntimeError(f"invalid vLLM flag cache {cache_file}: {exc}") from exc
 
-    rc, out = await run_command(
-        "docker",
-        "run",
-        "--rm",
-        "--entrypoint",
-        "vllm",
-        image_ref,
-        "serve",
-        "--help",
-        timeout=30,
+    command = (
+        ["docker", "exec", container_name, "vllm", "serve"]
+        if container_name else
+        ["docker", "run", "--rm", "--pull=never", "--entrypoint", "vllm", identity or image_ref, "serve"]
     )
+    rc, out = await run_command(*command, "--help", timeout=30)
+    if rc == 0 and "--help=all" in out:
+        rc, out = await run_command(*command, "--help=all", timeout=30)
     if rc != 0 or not out.strip():
         raise RuntimeError(
             f"could not inspect vLLM flags from {image_ref}: "
@@ -343,10 +334,10 @@ async def extract_vllm_params(image_tag: str = "") -> set[str]:
             params = _validate_flags(json.loads(out))
         except (json.JSONDecodeError, ValueError) as exc:
             raise RuntimeError(f"could not parse vLLM flags from {image_ref}: {exc}") from exc
-    if identity is None:
+    if identity is None and not container_name:
         identity = await image_identity(image_ref)
         if identity is not None:
-            cache_key = hashlib.sha256(f"{image_ref}@{identity}".encode()).hexdigest()[:16]
+            cache_key = hashlib.sha256(f"full-help-v2:{image_ref}@{identity}".encode()).hexdigest()[:16]
             cache_file = _VLLM_PARAMS_CACHE_DIR / f".vllm-params-{cache_key}.json"
     if cache_file is not None:
         _VLLM_PARAMS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
