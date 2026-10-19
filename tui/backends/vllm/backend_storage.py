@@ -120,8 +120,14 @@ def load_config(name: str) -> Config:
         )
     extra = {str(key): value for key, value in data.items()}
     # A disabled marker whose key is also an active key is ignored — active wins.
+    # `model` and `gpu-memory-utilization` are active too, but they were popped
+    # off `data` above, so they have to be added back: a stale marker for
+    # either of them must not be reported as a disabled param while the
+    # active value is the one being served. The llama.cpp loader applies the
+    # rule to every key.
+    active_keys = {"model", "gpu-memory-utilization"} | set(extra)
     disabled = {
-        k: v for k, v in parse_disabled_markers(text).items() if k not in extra
+        k: v for k, v in parse_disabled_markers(text).items() if k not in active_keys
     }
     config = Config(
         name=name,

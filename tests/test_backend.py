@@ -4277,6 +4277,51 @@ class DisabledParamsTests(unittest.TestCase):
                 self.assertEqual(loaded.params["ctx-size"], 2048)
                 self.assertNotIn("ctx-size", loaded.disabled_params)
 
+    def test_vllm_active_core_key_wins_over_a_stale_marker(self) -> None:
+        # `model` and `gpu-memory-utilization` are served too, so the
+        # "active key wins" rule has to cover them: they are popped off the
+        # mapping before the disabled markers are filtered, so a stale marker
+        # for either of them used to be reported as a disabled param while
+        # the active value was still the one being served.
+        from tui.common.config_markers import parse_disabled_markers
+        from tui.backends.vllm import backend_storage as vs
+        from tui.backends.vllm import backend_common as vc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(vs, "CONFIG_DIR", Path(tmp)), \
+                 patch.object(vc, "CONFIG_DIR", Path(tmp)):
+                path = Path(tmp) / "c.yaml"
+                path.write_text(
+                    "model: org/model\n"
+                    "gpu-memory-utilization: '0.85'\n"
+                    "max-model-len: 4096\n"
+                    "# llmux:disabled model: org/old-model\n"
+                    "# llmux:disabled gpu-memory-utilization: 0.5\n"
+                    "# llmux:disabled enforce-eager: true\n"
+                )
+                # Sanity: the marker parser does see them...
+                markers = parse_disabled_markers(path.read_text())
+                self.assertIn("model", markers)
+                self.assertIn("gpu-memory-utilization", markers)
+
+                loaded = vs.load_config("c")
+                # ...the active values are the ones the server gets...
+                self.assertEqual(loaded.model, "org/model")
+                self.assertEqual(str(loaded.gpu_memory_utilization), "0.85")
+                # ...and the active key wins over the stale marker.
+                self.assertNotIn("model", loaded.disabled_params)
+                self.assertNotIn("gpu-memory-utilization", loaded.disabled_params)
+                # A marker for a key that is not active stays disabled.
+                self.assertEqual(loaded.disabled_params, {"enforce-eager": True})
+
+                # Re-saving drops the stale markers instead of re-writing
+                # them next to the active value they contradict.
+                vs.save_config(loaded)
+                text = path.read_text()
+                self.assertNotIn("# llmux:disabled model:", text)
+                self.assertNotIn("# llmux:disabled gpu-memory-utilization:", text)
+                self.assertIn("# llmux:disabled enforce-eager:", text)
+
     def test_vllm_save_preserves_user_comments(self) -> None:
         # Editing a config used to erase every hand-written `#` note (PyYAML
         # can't round-trip comments). A header, an inline comment, and a
