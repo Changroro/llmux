@@ -34,7 +34,7 @@ class MemoryEstimateAuditTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
         ):
             with self.assertRaises(typer.Exit) as caught:
-                system.mem_estimate("org/model", json_out=True)
+                system.mem_estimate("org/model", profile=None, backend=None, json_out=True)
 
         self.assertEqual(caught.exception.exit_code, 1)
         result = json.loads(stdout.getvalue())

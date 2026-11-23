@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import math
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -54,7 +55,17 @@ def gpu(
 
 @app.command("mem-estimate")
 def mem_estimate(
-    model_id: str = typer.Argument(..., help="Hugging Face model id, e.g. Qwen/Qwen3-8B."),
+    model_id: Optional[str] = typer.Argument(
+        None, help="Hugging Face model id, e.g. Qwen/Qwen3-8B (omit with --profile)."
+    ),
+    profile: Optional[str] = typer.Option(
+        None, "--profile", "-p",
+        help="Estimate a profile as configured: its model (or GGUF file), "
+             "context length, KV dtype, GPU set and gpu-memory-utilization budget.",
+    ),
+    backend: Optional[str] = typer.Option(
+        None, "--backend", "-b", help="Backend of --profile; auto-detect if omitted."
+    ),
     json_out: bool = typer.Option(
         False, "--json",
         help="Emit a JSON record with parsed est_gb + per-GPU ratios.",
@@ -63,11 +74,26 @@ def mem_estimate(
     """Estimate a model's VRAM footprint and per-GPU fit."""
     import re as _re
 
-    from tui.common.docker import get_gpu_info, parse_gpu_reading
-    from tui.common.mem import estimate_model_memory
+    from tui.cli._runtime import detect_backend
+    from tui.common import profile_store
+    from tui.common.docker import get_gpu_info
+    from tui.common.mem import estimate_model_memory, gpu_fit, profile_estimate_request
+
+    if bool(model_id) == bool(profile):
+        raise typer.BadParameter("pass either MODEL_ID or --profile", param_hint="MODEL_ID")
+    options: dict = {}
+    gpu_ids: list[str] | None = None
+    utilization = 1.0
+    split: int | None = None
+    if profile:
+        stored = profile_store.load_profile(profile, detect_backend(profile, override=backend))
+        try:
+            model_id, options, gpu_ids, utilization, split = profile_estimate_request(stored)
+        except (OSError, ValueError) as exc:
+            raise typer.BadParameter(str(exc), param_hint="--profile") from exc
 
     async def _gather() -> tuple[str, list]:
-        estimate = await estimate_model_memory(model_id)
+        estimate = await estimate_model_memory(model_id, **options)
         gpus = await get_gpu_info()
         return estimate, gpus
 
@@ -85,46 +111,15 @@ def mem_estimate(
     match = _re.search(r"~([\d.]+)GB", estimate)
     est_gb = float(match.group(1)) if match else 0.0
     estimated = math.isfinite(est_gb) and est_gb > 0
-    n_gpus = len(gpus)
-    per_gpu_gb = est_gb / n_gpus if (n_gpus > 1 and estimated) else est_gb
-
-    fit_rows: list[dict] = []
-    any_over = False
-    any_unknown = not gpus
-    for g in gpus:
-        try:
-            total_gb = parse_gpu_reading(g.memory_total, "memory total") / 1024
-            if total_gb <= 0:
-                raise ValueError(f"invalid GPU memory total: {g.memory_total!r}")
-        except ValueError as exc:
-            any_unknown = True
-            fit_rows.append(
-                {
-                    "index": g.index,
-                    "name": g.name,
-                    "total_gb": None,
-                    "per_gpu_gb": round(per_gpu_gb, 1),
-                    "ratio": None,
-                    "over": None,
-                    "error": str(exc),
-                }
-            )
-            continue
-        ratio = per_gpu_gb / total_gb
-        over = ratio > 1.0
-        if over:
-            any_over = True
-        fit_rows.append(
-            {
-                "index": g.index,
-                "name": g.name,
-                "total_gb": round(total_gb, 1),
-                "per_gpu_gb": round(per_gpu_gb, 1),
-                "ratio": round(ratio, 3),
-                "over": over,
-                "error": None,
-            }
+    try:
+        per_gpu_gb, fit_rows = gpu_fit(
+            est_gb if estimated else 0.0, gpus, gpu_ids=gpu_ids, utilization=utilization, split=split
         )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--profile") from exc
+    n_gpus = len(fit_rows)
+    any_over = any(r["over"] for r in fit_rows)
+    any_unknown = not fit_rows or any(r["over"] is None for r in fit_rows)
 
     over_state = True if any_over else None if any_unknown else False
     status = "error" if any_unknown or not estimated else "over" if any_over else "ok"
@@ -133,6 +128,9 @@ def mem_estimate(
         emit_json(
             {
                 "model_id": model_id,
+                "profile": profile,
+                "options": options,
+                "utilization": utilization,
                 "estimate": estimate,
                 "est_gb": est_gb,
                 "n_gpus": n_gpus,
@@ -154,8 +152,9 @@ def mem_estimate(
     if not estimated:
         print("(no parseable size in estimate — skipping per-GPU fit view)")
         raise typer.Exit(code=1)
-    if n_gpus > 1:
-        print(f"TP={n_gpus}: {per_gpu_gb:.1f} GB/GPU")
+    if (split or n_gpus) > 1:
+        print(f"split over {split or n_gpus} GPU(s): {per_gpu_gb:.1f} GB/GPU")
+    budget_note = f" ({utilization:g} of each GPU)" if utilization != 1.0 else ""
     for r in fit_rows:
         if r["over"] is None:
             print(
@@ -164,12 +163,12 @@ def mem_estimate(
             )
         elif r["over"]:
             print(
-                f"  GPU{r['index']}  OVER  {r['per_gpu_gb']:.1f}/{r['total_gb']:.0f} GB"
+                f"  GPU{r['index']}  OVER  {r['per_gpu_gb']:.1f}/{r['budget_gb']:.1f} GB{budget_note}"
             )
         else:
             print(
                 f"  GPU{r['index']}  {r['ratio'] * 100:3.0f}%  "
-                f"{r['per_gpu_gb']:.1f}/{r['total_gb']:.0f} GB"
+                f"{r['per_gpu_gb']:.1f}/{r['budget_gb']:.1f} GB{budget_note}"
             )
     if any_over or any_unknown:
         raise typer.Exit(code=1)
