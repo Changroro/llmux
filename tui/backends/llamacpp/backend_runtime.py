@@ -7,6 +7,8 @@ import dataclasses
 import errno
 import json
 import os
+import re
+import shlex
 import socket
 import sys
 import urllib.request
@@ -971,6 +973,64 @@ async def stream_container_up(
             return
 
 
+_DRAFT_REPO_KEYS = frozenset({"spec-draft-hf", "hf-repo-draft", "hfd", "hfrd"})
+_DRAFT_FILE_KEYS = frozenset({"spec-draft-model", "model-draft", "md"})
+_MMPROJ_KEYS = frozenset({"mmproj", "mm"})
+_CONTAINER_HF_CACHE = "/root/.cache/huggingface"
+_CACHED_FILE_RE = re.compile(
+    rf"{re.escape(_CONTAINER_HF_CACHE)}/hub/models--([^/]+?)--([^/]+)/snapshots/[^/]+/(.+)"
+)
+
+
+def _config_flags(params: dict) -> list[tuple[str, object]]:
+    """(flag, value) for every config key and every option in extra-args."""
+    pairs: list[tuple[str, object]] = [(key, value) for key, value in params.items() if key != "extra-args"]
+    raw = params.get("extra-args") or []
+    tokens = shlex.split(raw) if isinstance(raw, str) else [str(token) for token in raw]
+    for index, token in enumerate(tokens):
+        if not token.startswith("-"):
+            continue
+        key, sep, value = token.lstrip("-").partition("=")
+        if not sep:
+            value = tokens[index + 1] if index + 1 < len(tokens) else True
+        pairs.append((key, value))
+    return pairs
+
+
+_MMPROJ_OFF_KEYS = frozenset({"mmproj", "mm", "mmproj-url", "mmu", "no-mmproj", "no-mmproj-auto"})
+
+
+def _wants_auto_mmproj(params: dict) -> bool:
+    """llama-server picks the repo's mmproj itself unless the config sets or disables one."""
+    for key, value in _config_flags(params):
+        if key in _MMPROJ_OFF_KEYS and value is not False:
+            return False
+        if key == "mmproj-auto" and value is False:
+            return False
+    return True
+
+
+def _prepare_extras(params: dict) -> list[dict[str, str]]:
+    """Draft-model repos and HF-cache mmproj files a config asks llama-server for."""
+    extras: list[dict[str, str]] = []
+    flags = _config_flags(params)
+    # `-md FILE` next to `-hfd repo` names the draft file in that repo (upstream sets hf_file).
+    draft_file = next((v for k, v in flags if k in _DRAFT_FILE_KEYS and isinstance(v, str)), "")
+    for key, value in flags:
+        if not isinstance(value, str):
+            continue
+        if key in _DRAFT_REPO_KEYS:
+            from .backend import split_quant_ref
+
+            repo, quant = split_quant_ref(value)
+            extras.append({"kind": "draft", "repo": repo, "quant": quant, "file": draft_file, "path": ""})
+        elif key in _MMPROJ_KEYS:
+            match = _CACHED_FILE_RE.fullmatch(value)
+            repo, file = (f"{match[1]}/{match[2]}", match[3]) if match else ("", "")
+            extras.append({"kind": "mmproj", "repo": repo, "quant": "", "file": file, "path": value})
+    return extras
+
+
 async def stream_container_prepare(profile_name: str, *, max_workers: int | None = None):
     stored = profile_store.load_profile(profile_name, "llamacpp")
     if stored is None:
@@ -1084,6 +1144,70 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         yield ("log", f"✗ 다운로드 실패 (rc={rc}).")
         yield ("rc", rc if rc != 0 else 1)
         return
+
+    for extra in _prepare_extras(load_config(profile.config_name or profile.name).params):
+        if not extra["repo"]:
+            yield ("log", f"⚠ {extra['kind']} {extra['path']} is not in the HF cache — not pre-downloaded")
+            continue
+        file = extra["file"]
+        if not file:
+            from .backend import list_repo_ggufs, pick_gguf_for_quant
+
+            try:
+                file = pick_gguf_for_quant(
+                    extra["repo"], extra["quant"], await list_repo_ggufs(extra["repo"]), strict=False
+                )
+            except (RuntimeError, ValueError) as exc:
+                yield ("log", f"✗ {extra['kind']} {extra['repo']}: {exc}")
+                yield ("rc", 1)
+                return
+        yield ("log", f"▸ {extra['kind']}: {extra['repo']} / {file} 다운로드 → {cache_path}")
+        rc = -1
+        async with aclosing(prepare.stream_llamacpp_download(hf_repo=extra["repo"], hf_file=file, cache_path=cache_path, token=prepare.hf_token(), container_name=prepare.prepare_container_name(profile.container_name), max_workers=max_workers)) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    rc = int(event[1])
+                else:
+                    yield event
+        if rc != 0:
+            yield ("log", f"✗ {extra['kind']} 다운로드 실패 (rc={rc}).")
+            yield ("rc", rc)
+            return
+        if extra["path"]:
+            host_path = Path(cache_path) / Path(extra["path"]).relative_to(_CONTAINER_HF_CACHE)
+            if not host_path.exists():
+                cached = prepare.gguf_in_cache(cache_path, extra["repo"], file)
+                actual = (
+                    f"{_CONTAINER_HF_CACHE}/{cached.relative_to(cache_path).as_posix()}"
+                    if cached is not None else "(not found in the cache)"
+                )
+                yield ("log", f"✗ config {extra['kind']} path is stale: {extra['path']}")
+                yield ("log", f"  the downloaded file is at: {actual}")
+                yield ("rc", 1)
+                return
+
+    if _wants_auto_mmproj(load_config(profile.config_name or profile.name).params):
+        from .backend import HfListingUnavailable, find_best_sibling, list_hf_repo_files
+
+        try:
+            files = [e["path"] for e in await list_hf_repo_files(profile.hf_repo) if e["type"] == "file"]
+        except HfListingUnavailable as exc:
+            files = []
+            yield ("log", f"Warning: could not check {profile.hf_repo} for an mmproj ({exc}); llama-server fetches it at start if there is one")
+        mmproj = find_best_sibling(files, hf_file, "mmproj")
+        if mmproj:
+            yield ("log", f"▸ mmproj (auto): {profile.hf_repo} / {mmproj} 다운로드 → {cache_path}")
+            rc = -1
+            async with aclosing(prepare.stream_llamacpp_download(hf_repo=profile.hf_repo, hf_file=mmproj, cache_path=cache_path, token=prepare.hf_token(), container_name=prepare.prepare_container_name(profile.container_name), max_workers=max_workers)) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "rc":
+                        rc = int(event[1])
+                    else:
+                        yield event
+            if rc != 0:
+                yield ("log", f"✗ mmproj 다운로드 실패 (rc={rc}).")
+                yield ("rc", rc)
+                return
 
     yield ("log", f"✓ '{profile_name}' 준비 완료 — 시작: llmux up {profile_name}")
     yield ("rc", 0)

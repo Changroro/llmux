@@ -676,23 +676,57 @@ def group_gguf_entries(entries: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda row: (row["mmproj"], row["file"]))
 
 
+def _quant_bits(path: str) -> int:
+    """Q4_K_M → 4, F16 → 16; 0 when the name carries no quant (upstream extract_quant_bits)."""
+    if not path.endswith(".gguf"):
+        return 0
+    prefix = path[: -len(".gguf")]
+    split = re.match(r"^(.+)-[0-9]{5}-of-[0-9]{5}$", prefix, re.I)
+    if split:
+        prefix = split[1]
+    tag = re.search(r"[-.]([A-Z0-9_]+)$", prefix, re.I)
+    digits = re.search(r"[0-9]+", tag[1]) if tag else None
+    return int(digits[0]) if digits else 0
+
+
+def find_best_sibling(files: list[str], model: str, keyword: str) -> str:
+    """The sidecar llama-server auto-picks next to `model` ("" when none).
+
+    shortcut: mirrors upstream common/download.cpp find_best_sibling at f4f6f2e7
+    (no-tag case); if upstream drifts, `up` just downloads one more file.
+    """
+    model_dirs = model.split("/")[:-1]
+    model_bits = _quant_bits(model)
+    best, best_depth, best_diff = "", -1, 0
+    for path in files:
+        if not path.endswith(".gguf") or keyword not in path:
+            continue
+        sib_dirs = path.split("/")[:-1]
+        if sib_dirs != model_dirs[: len(sib_dirs)]:
+            continue
+        depth, diff = len(sib_dirs), abs(_quant_bits(path) - model_bits)
+        if depth > best_depth or (depth == best_depth and diff < best_diff):
+            best, best_depth, best_diff = path, depth, diff
+    return best
+
+
 def split_quant_ref(ref: str) -> tuple[str, str]:
     """`org/name:Q4_K_M` → (`org/name`, `Q4_K_M`); no tag → (ref, "")."""
     repo, _, quant = ref.partition(":")
     return repo, quant
 
 
-def pick_gguf_for_quant(repo: str, quant: str, ggufs: list[str]) -> str:
+def pick_gguf_for_quant(repo: str, quant: str, ggufs: list[str], *, strict: bool = True) -> str:
     """The entry GGUF llama-server picks for `quant` (upstream find_best_model).
 
     No quant: Q4_K_M, then Q8_0, then the first model; the first match wins.
-    A user-given quant that matches several files is refused instead.
+    `strict` refuses a user-given quant that matches several files instead.
     """
     models = [path for path in ggufs if _is_entry_gguf(path) and not _is_mmproj(path)]
     for tag in [quant] if quant else ["Q4_K_M", "Q8_0"]:
         pattern = re.compile(rf"(^|[-./]){re.escape(tag.lower())}([-.]|$)")
         matches = [path for path in models if pattern.search(path.lower())]
-        if len(matches) > 1 and quant:
+        if len(matches) > 1 and quant and strict:
             raise ValueError(
                 f":{quant} is ambiguous in {repo} — pass the file instead:\n  " + "\n  ".join(matches)
             )
