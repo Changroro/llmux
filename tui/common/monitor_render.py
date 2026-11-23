@@ -143,8 +143,18 @@ class Derived:
     gen_tps: float | None = None
     prompt_tps: float | None = None
     prefix_rate: float | None = None
+    accept_rate: float | None = None
     done_tps: float | None = None
     lat: dict[str, float | None] = field(default_factory=dict)
+
+
+def _window_ratio(prev: tuple[float, float] | None, hits: float, total: float) -> float | None:
+    """hits/total over the last sample window, or since start when nothing moved."""
+    if prev is not None:
+        h0, t0 = prev
+        if total - t0 > 0 and hits >= h0:
+            return (hits - h0) / (total - t0)
+    return hits / total if total > 0 else None
 
 
 class MonitorState:
@@ -159,6 +169,7 @@ class MonitorState:
         self.peak_kv: float | None = None
         self._prev_tokens: tuple[float, float, float] | None = None
         self._prev_prefix: tuple[float, float] | None = None
+        self._prev_draft: tuple[float, float] | None = None
         self._prev_done: tuple[float, float] | None = None
         self._prev_hist: dict[str, tuple[float, float]] = {}
 
@@ -173,6 +184,7 @@ class MonitorState:
             self.kv.append(None)
             self._prev_tokens = None
             self._prev_prefix = None
+            self._prev_draft = None
             self._prev_done = None
             self._prev_hist.clear()
             return d
@@ -212,16 +224,11 @@ class MonitorState:
             )
 
         if snap.prefix_hits is not None and snap.prefix_queries is not None:
-            h, q = snap.prefix_hits, snap.prefix_queries
-            if self._prev_prefix is not None:
-                h0, q0 = self._prev_prefix
-                if q - q0 > 0 and h >= h0:
-                    d.prefix_rate = (h - h0) / (q - q0)
-                elif q > 0:
-                    d.prefix_rate = h / q
-            elif q > 0:
-                d.prefix_rate = h / q
-            self._prev_prefix = (h, q)
+            d.prefix_rate = _window_ratio(self._prev_prefix, snap.prefix_hits, snap.prefix_queries)
+            self._prev_prefix = (snap.prefix_hits, snap.prefix_queries)
+        if snap.accepted_tokens is not None and snap.draft_tokens is not None:
+            d.accept_rate = _window_ratio(self._prev_draft, snap.accepted_tokens, snap.draft_tokens)
+            self._prev_draft = (snap.accepted_tokens, snap.draft_tokens)
 
         if snap.requests_finished is not None:
             f = snap.requests_finished
@@ -345,6 +352,8 @@ def _cache_panel(snap, d: Derived) -> Panel:
     ):
         ext = snap.ext_prefix_hits / snap.ext_prefix_queries
     row("external", ext)
+    if snap is not None and snap.draft_tokens:  # llama-server exports 0 without a draft model
+        row("draft acc", d.accept_rate)
     return Panel(
         tbl, title="CACHE HIT", title_align="left",
         border_style=_BORDER, style=_TITLE, box=box.ROUNDED, padding=(0, 1),

@@ -489,7 +489,7 @@ async def test_non_address_in_use_bind_error_is_a_probe_failure(runtime, profile
 
     with (
         patch.object(runtime, run_name, AsyncMock(return_value=(0, ""))),
-        patch.object(runtime.socket, "socket", return_value=socket_instance),
+        patch("socket.socket", return_value=socket_instance),
     ):
         with pytest.raises(RuntimeError, match="bind probe failed"):
             await runtime.check_port_conflict(profile)
@@ -523,7 +523,7 @@ async def test_address_in_use_bind_error_is_a_conflict(runtime, profile) -> None
 
     with (
         patch.object(runtime, run_name, AsyncMock(return_value=(0, ""))),
-        patch.object(runtime.socket, "socket", return_value=socket_instance),
+        patch("socket.socket", return_value=socket_instance),
     ):
         conflict = await runtime.check_port_conflict(profile)
 

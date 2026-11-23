@@ -112,7 +112,7 @@ class LlamacppProbeAuditTests(unittest.IsolatedAsyncioTestCase):
                 event async for event in backend_runtime.stream_container_up("p")
             ]
 
-        self.assertEqual(events[-1], ("rc", 1))
+        self.assertEqual(events[-1], ("rc", 5))  # exit_codes.UNREACHABLE
         self.assertIn("GPU conflict scan failed", events[0][1])
 
 

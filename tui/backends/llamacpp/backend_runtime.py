@@ -4,12 +4,10 @@ from contextlib import aclosing
 
 import asyncio
 import dataclasses
-import errno
 import json
 import os
 import re
 import shlex
-import socket
 import sys
 import urllib.request
 from tui.common.ssl_ctx import open_url
@@ -20,12 +18,15 @@ from tui.common import dev_build, prepare, profile_store
 from tui.common import docker as common_docker
 from tui.common.conflicts import (
     gpu_conflict_messages as _shared_gpu_conflict_messages,
+    local_port_in_use,
     published_tcp_host_ports,
 )
 from tui.common.docker import (
     run_command as _docker_run,
 )
 from tui.common.env import bind_host, validate_common_env
+from tui.common.exit_codes import CONFLICT, NOT_READY, UNREACHABLE
+from tui.common.http import exposure_warning
 
 from .backend import (
     COMMON_ENV,
@@ -37,6 +38,7 @@ from .backend import (
     Config,
     Profile,
     _parse_env_file,
+    FlagListNotCached,
     extract_llama_server_flags,
     list_profile_names,
     load_config,
@@ -263,7 +265,8 @@ def _resolve_runtime_image(
     return LLAMACPP_OFFICIAL_IMAGE
 
 
-def _compose_base_args(profile: Profile) -> list[str]:
+def _compose_base_args(profile: Profile, *, rendered: bool = False) -> list[str]:
+    """`rendered`: `up` writes the profile .env before compose runs, so a dry-run plan names it too."""
     args = [
         "docker",
         "compose",
@@ -275,7 +278,7 @@ def _compose_base_args(profile: Profile) -> list[str]:
     ]
     if COMMON_ENV.exists():
         args.extend(["--env-file", str(COMMON_ENV)])
-    if profile.path.exists():
+    if rendered or profile.path.exists():
         args.extend(["--env-file", str(profile.path)])
     return args
 
@@ -283,16 +286,16 @@ def _compose_base_args(profile: Profile) -> list[str]:
 RENDER_FLAGS_ENV = "LLMUX_LLAMA_SERVER_FLAGS"
 
 
-async def _render_flags_env(params: dict, image_ref: str) -> dict[str, str]:
+async def _render_flags_env(params: dict, image_ref: str, *, cache_only: bool = False) -> dict[str, str]:
     """Flag list the renderer needs to turn `key: false` into `--no-key`."""
     on_off = _renderer()._BOOL_VALUE_FLAGS  # rendered as `--key off`, no flag list needed
     if not any(value is False and key not in on_off for key, value in params.items()):
         return {}
-    flags = await extract_llama_server_flags(image_ref)
+    flags = await extract_llama_server_flags(image_ref, cache_only=cache_only)
     return {RENDER_FLAGS_ENV: json.dumps(sorted(flags))}
 
 
-async def _render_override(profile: Profile, image_ref: str, *, check: bool = False) -> tuple[int, str]:
+async def _render_override(profile: Profile, image_ref: str) -> tuple[int, str]:
     try:
         extra = await _render_flags_env(
             load_config(profile.config_name or profile.name).params, image_ref
@@ -305,7 +308,6 @@ async def _render_override(profile: Profile, image_ref: str, *, check: bool = Fa
     return await _run(
         sys.executable,
         str(SCRIPTS_DIR / "render-override.py"),
-        *(["--check"] if check else []),
         profile.name,
         env={**os.environ, **extra} if extra else None,
     )
@@ -342,19 +344,9 @@ async def check_port_conflict(profile: Profile) -> str | None:
                     return f"profile '{name}'"
             return f"container '{container_name}'"
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # SO_REUSEADDR ignores TIME_WAIT but still detects active listeners.
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.bind(("127.0.0.1", int(port)))
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            return f"another local process on 127.0.0.1:{port}"
-        raise RuntimeError(
-            f"local port bind probe failed for 127.0.0.1:{port}: {exc}"
-        ) from exc
-    finally:
-        sock.close()
+    host = bind_host(_parse_env_file(COMMON_ENV, expand=True) if COMMON_ENV.exists() else {})
+    if local_port_in_use(int(port), host):
+        return f"another local process on {host}:{port}"
     return None
 
 
@@ -399,7 +391,14 @@ async def get_container_statuses() -> list[ContainerStatus]:
     return statuses
 
 
+class ServerAnswerError(RuntimeError):
+    """/v1/models answered with a real error (bad API key, …), not "still loading"."""
+
+
 async def _models_endpoint_ready(port: str | int, timeout: int = 3, *, api_key: str = "") -> bool:
+    """True once a model is served; False while loading (readiness._classify's rule)."""
+    from tui.common.readiness import _classify
+
     loop = asyncio.get_running_loop()
 
     def _probe() -> bool:
@@ -412,7 +411,9 @@ async def _models_endpoint_ready(port: str | int, timeout: int = 3, *, api_key: 
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
             data = payload.get("data", [])
             return any(isinstance(item, dict) and item.get("id") for item in data)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — classified below
+            if _classify(exc) == "error":
+                raise ServerAnswerError(f"{type(exc).__name__}: {exc}") from exc
             return False
 
     return await loop.run_in_executor(None, _probe)
@@ -461,7 +462,7 @@ async def _post_start_validation(
             "inspect",
             profile.container_name,
             "--format",
-            "{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+            "{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\t{{.Id}}",
             timeout=10,
         )
         if rc != 0:
@@ -472,28 +473,26 @@ async def _post_start_validation(
                     f"Error: could not inspect container '{profile.container_name}' after startup.",
                     f"  {state.strip() or 'docker inspect failed'}",
                 ],
+                "unreachable",
             )
             return
-        status, _, health = state.strip().partition("\t")
+        status, health, container_id = (state.strip().split("\t") + ["", ""])[:3]
         status = status or "unknown"
 
-        if status in {"restarting", "exited", "dead"} or health == "unhealthy":
+        # `running` + `unhealthy` is not a crash: a first download can outlast
+        # the healthcheck start_period. Only a stopped process is.
+        if status in {"restarting", "exited", "dead"}:
             logs_rc, tail = await _docker_run(
                 "docker", "logs", "--tail", "80", profile.container_name, timeout=10
             )
-            reason = (
-                f"container '{profile.container_name}' exited during startup ({status})"
-                if status in {"restarting", "exited", "dead"}
-                else f"container '{profile.container_name}' became unhealthy during startup"
-            )
-            msgs = [f"Error: {reason}."]
+            msgs = [f"Error: container '{profile.container_name}' exited during startup ({status})."]
             if logs_rc != 0:
                 detail = tail.strip() or f"docker logs exited with status {logs_rc}"
                 msgs.append(f"Recent logs unavailable: {detail}")
             elif tail.strip():
                 msgs.append("Recent logs:")
                 msgs.extend([f"  {line}" for line in tail.strip().splitlines()[-12:]])
-            yield ("result", False, msgs, "crashed")
+            yield ("result", False, msgs, "crashed", container_id)
             return
 
         if status != "running":
@@ -506,22 +505,25 @@ async def _post_start_validation(
             )
             return
 
-        if await _models_endpoint_ready(profile.port, **({"api_key": api_key} if api_key else {})):
+        try:
+            ready = await _models_endpoint_ready(profile.port, **({"api_key": api_key} if api_key else {}))
+        except ServerAnswerError as exc:
+            yield ("result", False, [f"Error: {profile.name} answered /v1/models with an error — {exc}. Check its config (api-key?)."])
+            return
+        if ready:
             yield ("result", True, [])
             return
 
         progressed = False
         downloading = False
 
-        try:
-            cache_size = await _dir_size_bytes(hf_cache_path)
-        except RuntimeError as exc:
-            yield (
-                "result",
-                False,
-                [f"Error: startup progress probe failed: {exc}"],
-            )
-            return
+        cache_size = None
+        if hf_cache_path is not None:
+            try:
+                cache_size = await _dir_size_bytes(hf_cache_path) if Path(hf_cache_path).exists() else 0
+            except RuntimeError as exc:
+                yield ("log", f"Warning: startup progress probe (du) failed — {exc}; continuing without download tracking")
+                hf_cache_path = None
         if (
             last_cache_size is not None
             and cache_size is not None
@@ -542,6 +544,7 @@ async def _post_start_validation(
                 "result",
                 False,
                 [f"Error: startup progress probe failed: {detail}"],
+                "unreachable",
             )
             return
         if last_log_tail is not None and log_tail != last_log_tail:
@@ -591,6 +594,10 @@ async def _post_start_validation(
         await asyncio.sleep(poll_interval)
 
 
+def _default_config_params(config_name: str) -> dict:
+    return {"alias": config_name, "ctx-size": 8192, "n-gpu-layers": 99}
+
+
 def _ensure_profile_config(
     stored: profile_store.StoredProfile, profile: Profile, *, dry_run: bool = False
 ) -> tuple[bool, list[str]]:
@@ -624,11 +631,7 @@ def _ensure_profile_config(
             try:
                 save_config(Config(
                     name=latest_stored.config_name,
-                    params={
-                        "alias": latest_stored.config_name,
-                        "ctx-size": 8192,
-                        "n-gpu-layers": 99,
-                    },
+                    params=_default_config_params(latest_stored.config_name),
                 ))
             except Exception as exc:  # noqa: BLE001
                 messages.append(f"✗ 기본 config 생성 실패: {exc}")
@@ -675,6 +678,17 @@ async def _resolve_pending_quant(profile_name: str) -> str:
     return f"▸ {repo}:{quant} → {hf_file}"
 
 
+async def _preview_quant(profile: Profile) -> Profile:
+    """dry-run twin of _resolve_pending_quant: resolve in memory, store nothing."""
+    from .backend import list_repo_ggufs, pick_gguf_for_quant, split_quant_ref
+
+    repo, quant = split_quant_ref(profile.hf_repo)
+    if quant:
+        profile.hf_repo = repo
+        profile.hf_file = pick_gguf_for_quant(repo, quant, await list_repo_ggufs(repo))
+    return profile
+
+
 _RENDERER = None
 
 
@@ -691,6 +705,68 @@ def _renderer():
         spec.loader.exec_module(module)
         _RENDERER = module
     return _RENDERER
+
+
+async def _preview_command(profile: Profile, image_ref: str, *, staged: bool) -> list[str]:
+    """llama-server argv for a dry run. Unless `staged` (image fetched),
+    it starts no container and writes nothing: flags come from the cache only."""
+    config_name = profile.config_name or profile.name
+    params = (
+        load_config(config_name).params
+        if (CONFIG_DIR / f"{config_name}.yaml").exists()
+        else _default_config_params(config_name)
+    )
+    from tui.common.prepare import resolve_gguf_file
+
+    env = await _render_flags_env(params, image_ref, cache_only=not staged)
+    flags = json.loads(env.get(RENDER_FLAGS_ENV, "null"))
+    stored = profile_store.load_profile(profile.name, "llamacpp")
+    params = dict(params)
+    # migrate_gguf_sources' rule, in memory: a dry run skips the migration writes.
+    hf_file = resolve_gguf_file(params.pop("model-file", None), stored.model_file if stored else "", profile.hf_file)
+    return _renderer().render_command(
+        params, hf_repo=profile.hf_repo, hf_file=hf_file, known_flags=flags,
+    )
+
+
+def _pull_policy(image_ref: str, pull: bool, staged: bool = False) -> str:
+    """`staged`: a --replace precheck already secured the image — never fetch it again."""
+    dev = image_ref.startswith(f"{LLAMACPP_DEV_SPEC.image_prefix}:")
+    return "never" if dev or staged else "always" if pull else "missing"
+
+
+def _compose_up_command(profile: Profile, image_ref: str, pull: bool, staged: bool = False) -> list[str]:
+    return [*_compose_base_args(profile, rendered=True), "up", "-d", "--pull", _pull_policy(image_ref, pull, staged)]
+
+
+# shortcut: hand-listed llama-server options whose value is a secret; extend when the image adds one.
+_SECRET_ARGS = frozenset({"--api-key", "--hf-token", "-hft"})
+
+
+def _redact_args(args: list[str]) -> list[str]:
+    """argv safe to print: secret option values become <redacted>."""
+    out: list[str] = []
+    hide = False
+    for arg in args:
+        option, eq, _ = arg.partition("=")
+        if hide:
+            out.append("<redacted>")
+        elif eq and option in _SECRET_ARGS:
+            out.append(f"{option}=<redacted>")
+        else:
+            out.append(arg)
+        hide = not hide and not eq and arg in _SECRET_ARGS
+    return out
+
+
+def _model_cache_dir(cache_path: str, hf_repo: str) -> str | None:
+    """Host dir whose growth means the model is still downloading."""
+    if not cache_path or not hf_repo:
+        return None
+    try:
+        return str(prepare.hf_repo_cache_dir(cache_path, hf_repo))
+    except ValueError:
+        return None
 
 
 def _render_profile_snapshot(profile_name: str, *, write: bool = True) -> tuple[Profile, Path]:
@@ -720,6 +796,8 @@ async def stream_container_up(
     stage_image: bool = False,
     image_staged: bool = False,
 ):
+    """Start a profile. `dry_run` validates and renders without writing config,
+    building, pulling or starting anything; it ends with one ("plan", {...})."""
     stored = profile_store.load_profile(profile_name, "llamacpp")
     if stored is None:
         yield ("log", f"✗ 프로필 없음: llamacpp/{profile_name} (profiles.yaml 확인)")
@@ -764,38 +842,71 @@ async def stream_container_up(
             conflict = await check_port_conflict(profile)
         except RuntimeError as exc:
             yield ("log", f"✗ 포트 사전 확인 실패: {exc}")
-            yield ("rc", 1)
+            yield ("rc", UNREACHABLE)
             return
         if conflict:
             yield ("log", f"✗ 포트 {profile.port} 사용 중 — {conflict}")
-            yield ("rc", 1)
+            yield ("rc", CONFLICT)
             return
     try:
         gpu_messages = await _gpu_conflict_messages(profile)
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"✗ GPU 충돌 사전 확인 실패: {exc}")
-        yield ("rc", 1)
+        yield ("rc", UNREACHABLE)
         return
     for message in gpu_messages:
         yield ("log", message)
+    exposure = await exposure_warning("llamacpp", profile.name)
+    if exposure:
+        yield ("log", exposure)
 
-    # Config linking must precede transient image_tag assignment.
-    try:
-        ok, cfg_messages = (
-            _ensure_profile_config(stored, profile, dry_run=True) if dry_run
-            else _ensure_profile_config(stored, profile)
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        yield ("log", f"✗ config 저장 실패: {exc}")
-        yield ("rc", 1)
-        return
-    for message in cfg_messages:
-        yield ("log", message)
-    if not ok:
-        yield ("rc", 1)
-        return
+    if dry_run:
+        try:
+            ok, cfg_messages = _ensure_profile_config(stored, profile, dry_run=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ config 확인 실패: {exc}")
+            yield ("rc", 1)
+            return
+        for message in cfg_messages:
+            yield ("log", message)
+        if not ok:
+            yield ("rc", 1)
+            return
+        if stage_image:  # --replace precheck: pin the GGUF now, so the real start looks nothing up
+            try:
+                resolved = await _resolve_pending_quant(profile_name)
+            except (OSError, RuntimeError, ValueError) as exc:
+                yield ("log", f"✗ quant tag 해석 실패: {exc}")
+                yield ("rc", 1)
+                return
+            if resolved:
+                yield ("log", resolved)
+        try:
+            profile, _ = _render_profile_snapshot(profile_name, write=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ profile env 확인 실패: {exc}")
+            yield ("rc", 1)
+            return
+        try:
+            profile = await _preview_quant(profile) if not stage_image else profile
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ quant tag 해석 실패: {exc}")
+            yield ("rc", 1)
+            return
+    else:
+        # Config linking must precede transient image_tag assignment.
+        try:
+            ok, cfg_messages = _ensure_profile_config(stored, profile)
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ config 저장 실패: {exc}")
+            yield ("rc", 1)
+            return
+        for message in cfg_messages:
+            yield ("log", message)
+        if not ok:
+            yield ("rc", 1)
+            return
 
-    if not dry_run:
         try:
             resolved = await _resolve_pending_quant(profile_name)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -805,19 +916,17 @@ async def stream_container_up(
         if resolved:
             yield ("log", resolved)
 
-    try:
-        profile, _ = (
-            _render_profile_snapshot(profile_name, write=False) if dry_run
-            else _render_profile_snapshot(profile_name)
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        yield ("log", f"✗ profile env render 실패: {exc}")
-        yield ("rc", 1)
-        return
+        try:
+            profile, _ = _render_profile_snapshot(profile_name)
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ profile env render 실패: {exc}")
+            yield ("rc", 1)
+            return
 
     resolved_image_tag = _resolve_runtime_image(
         profile, use_default_image=use_default_image, tag=tag
     )
+    needs_build = False
     if use_dev:
         default_repo, default_branch = get_dev_build_defaults()
         resolved_repo = (repo_url or default_repo).strip()
@@ -834,7 +943,7 @@ async def stream_container_up(
             exists = await dev_build.image_exists_locally(LLAMACPP_DEV_SPEC, dev_tag)
         except RuntimeError as exc:
             yield ("log", f"✗ Docker 이미지 확인 실패: {exc}")
-            yield ("rc", 1)
+            yield ("rc", UNREACHABLE)
             return
 
         try:
@@ -845,13 +954,14 @@ async def stream_container_up(
             )
         except RuntimeError as exc:
             yield ("log", f"✗ Docker 이미지 metadata 확인 실패: {exc}")
-            yield ("rc", 1)
+            yield ("rc", UNREACHABLE)
             return
         if not exists:
             yield ("log", f"▸ Dev image {resolved_image_tag} not found — building from {resolved_repo}@{resolved_branch}")
         elif not matches:
             yield ("log", f"▸ Dev image {resolved_image_tag} exists but was built from a different repo/branch — rebuilding from {resolved_repo}@{resolved_branch}")
-        if not matches and dry_run and not stage_image:
+        needs_build = not matches and not stage_image
+        if needs_build and dry_run:
             yield ("log", "Dry run: dev image would be built first.")
         elif not matches:
             async with aclosing(_stream_build_dev_image(resolved_branch, repo_url=resolved_repo, custom_tag=tag)) as _owned_stream:
@@ -884,7 +994,7 @@ async def stream_container_up(
             exists = await dev_build.image_exists_locally(LLAMACPP_DEV_SPEC, dev_tag)
         except RuntimeError as exc:
             yield ("log", f"✗ Docker 이미지 확인 실패: {exc}")
-            yield ("rc", 1)
+            yield ("rc", UNREACHABLE)
             return
         if not exists:
             yield ("log", f"✗ Dev image {resolved_image_tag} not found locally.")
@@ -896,14 +1006,36 @@ async def stream_container_up(
     elif not use_dev and resolved_image_tag:
         yield ("log", f"▸ Image: {resolved_image_tag}")
 
+    if dry_run:
+        if stage_image:  # before the preview: `key: false` reads the flag list from the image
+            async with aclosing(prepare.secure_image(resolved_image_tag, _pull_policy(resolved_image_tag, pull), stage=True)) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "rc":
+                        if int(event[1]) != 0:
+                            yield event
+                            return
+                    else:
+                        yield event
+        try:
+            server_args = await _preview_command(profile, resolved_image_tag, staged=stage_image)
+        except FlagListNotCached as exc:
+            server_args = None
+            yield ("log", f"Dry run: llama-server args not rendered — {exc}")
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ command 렌더 실패: {exc}")
+            yield ("rc", 1)
+            return
+        yield ("plan", {
+            "command": _compose_up_command(profile, resolved_image_tag, pull),
+            "server_args": _redact_args(server_args) if server_args is not None else None,
+            "image": resolved_image_tag,
+            "build": needs_build,
+        })
+        yield ("rc", 0)
+        return
+
     yield ("log", "▸ command 렌더링")
-    if dry_run and not (CONFIG_DIR / f"{profile.config_name or profile_name}.yaml").exists():
-        # The real `up` creates the default config first; nothing to render against yet.
-        rc, out = 0, ""
-    elif dry_run:
-        rc, out = await _render_override(profile, resolved_image_tag, check=True)
-    else:
-        rc, out = await _render_override(profile, resolved_image_tag)
+    rc, out = await _render_override(profile, resolved_image_tag)
     if rc != 0:
         yield ("log", out.strip() or "✗ override 렌더 실패")
         yield ("rc", rc)
@@ -920,27 +1052,7 @@ async def stream_container_up(
     else:
         env["LLAMACPP_IMAGE"] = resolved_image_tag
         env["LLAMACPP_DEV_TAG"] = ""
-    pull_policy = (
-        "never" if resolved_image_tag.startswith(f"{LLAMACPP_DEV_SPEC.image_prefix}:")
-        else "always" if pull
-        else "missing"
-    )
-    if image_staged:  # --replace already secured this image before stopping anything
-        pull_policy = "never"
-    cmd = [*_compose_base_args(profile), "up", "-d", "--pull", pull_policy]
-    if dry_run:
-        if stage_image:
-            async with aclosing(prepare.secure_image(resolved_image_tag, pull_policy, stage=True)) as _owned_stream:
-                async for event in _owned_stream:
-                    if event[0] == "rc":
-                        if int(event[1]) != 0:
-                            yield event
-                            return
-                    else:
-                        yield event
-        yield ("plan", {"command": cmd, "image": resolved_image_tag})
-        yield ("rc", 0)
-        return
+    cmd = _compose_up_command(profile, resolved_image_tag, pull, image_staged)
 
     async with aclosing(_stream(cmd, env=env)) as _owned_stream:
         async for event in _owned_stream:
@@ -953,15 +1065,37 @@ async def stream_container_up(
                 return
 
             ok = False
+            outcome = "error"
+            crashed_id = ""
             val_messages: list[str] = []
-            async with aclosing(_post_start_validation(profile, timeout=stall_timeout, max_wait=ready_timeout, hf_cache_path=env.get('HF_CACHE_PATH') or None)) as _owned_stream:
+            progress = _model_cache_dir(env.get("HF_CACHE_PATH", ""), profile.hf_repo)
+            async with aclosing(_post_start_validation(profile, timeout=stall_timeout, max_wait=ready_timeout, hf_cache_path=progress)) as _owned_stream:
                 async for ev in _owned_stream:
                     if ev[0] == "result":
                         ok, val_messages = ev[1], ev[2]
+                        outcome = ev[3] if len(ev) > 3 else ("ready" if ok else "error")
+                        crashed_id = ev[4] if len(ev) > 4 else ""
                     else:
                         yield ev
             for msg in val_messages:
                 yield ("log", msg)
+            if outcome == "crashed":
+                # Stop the restart loop by ID: a newer `up` may already own the name.
+                if crashed_id:
+                    rm_rc, rm_out = await _docker_run("docker", "rm", "-f", crashed_id, timeout=30)
+                    yield ("log", f"▸ removed crashed container {crashed_id[:12]}" if rm_rc == 0
+                           else f"Error: could not remove crashed container {crashed_id[:12]}: {rm_out.strip()}")
+                else:
+                    yield ("log", f"Warning: crashed container id unknown — left '{profile.container_name}' in place; stop it with `llmux down {profile_name}`")
+                yield ("rc", 1)
+                return
+            if outcome == "stalled":
+                yield ("log", f"Error: {profile_name} is not ready yet; it is still running. Wait with: llmux wait {profile_name}")
+                yield ("rc", NOT_READY)
+                return
+            if outcome == "unreachable":
+                yield ("rc", UNREACHABLE)
+                return
             if not ok:
                 yield ("rc", 1)
                 return
@@ -1096,7 +1230,7 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         present = await prepare.image_present(image_ref)
     except RuntimeError as exc:
         yield ("log", f"✗ Docker 이미지 확인 실패: {exc}")
-        yield ("rc", 1)
+        yield ("rc", UNREACHABLE)
         return
     if not present:
         if image_ref.startswith(f"{LLAMACPP_DEV_SPEC.image_prefix}:"):

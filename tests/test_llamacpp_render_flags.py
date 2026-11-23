@@ -94,13 +94,23 @@ class RenderFlagFetchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(env, {})
             extract.assert_not_awaited()
             env = await backend_runtime._render_flags_env({"jinja": False}, "img:1")
-        extract.assert_awaited_once_with("img:1")
+        extract.assert_awaited_once_with("img:1", cache_only=False)
         self.assertEqual(json.loads(env[R.FLAGS_ENV]), ["jinja", "no-jinja"])
 
     async def test_on_off_flags_need_no_flag_list(self) -> None:
         extract = AsyncMock(side_effect=AssertionError("flash-attn renders on/off without the image"))
         with patch.object(backend_runtime, "extract_llama_server_flags", extract):
             self.assertEqual(await backend_runtime._render_flags_env({"flash-attn": False}, "img:1"), {})
+
+    async def test_cache_only_never_runs_docker_or_writes(self) -> None:
+        from tui.backends.llamacpp import backend
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(backend, "CONFIG_DIR", Path(tmp)), patch(
+            "tui.common.docker.image_identity", AsyncMock(return_value="sha256:abc")
+        ), patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=AssertionError("docker run"))):
+            with self.assertRaises(backend.FlagListNotCached):
+                await backend.extract_llama_server_flags("img:1", cache_only=True)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
 
 class ModelPresetTests(unittest.TestCase):

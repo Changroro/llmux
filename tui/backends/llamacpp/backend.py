@@ -387,7 +387,17 @@ def format_config_param_value(value: Any) -> str:
     return str(value)
 
 
-async def extract_llama_server_flags(image_ref: str = "", *, container_name: str = "") -> set[str]:
+class FlagListNotCached(RuntimeError):
+    """`cache_only` lookup found no cached llama-server flag list for the image."""
+
+
+async def extract_llama_server_flags(
+    image_ref: str = "", *, container_name: str = "", cache_only: bool = False
+) -> set[str]:
+    """llama-server's flags for an image (cached per image id) or a running container.
+
+    `cache_only` reads the cache and never runs a container or writes a file.
+    """
     if image_ref:
         image = image_ref
     else:
@@ -419,6 +429,11 @@ async def extract_llama_server_flags(image_ref: str = "", *, container_name: str
             return set(cached)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
             raise RuntimeError(f"invalid llama.cpp flag cache {cache_file}: {exc}") from exc
+    if cache_only:
+        raise FlagListNotCached(
+            f"llama-server flag list for {image} is not cached — "
+            "`llmux config flags --profile <name>` caches it"
+        )
     proc = None
     try:
         command = (

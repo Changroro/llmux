@@ -3710,7 +3710,6 @@ class SnapshotParseTests(unittest.TestCase):
             "llamacpp:tokens_predicted_total 800\n"
             "llamacpp:requests_processing 2\n"
             "llamacpp:requests_deferred 0\n"
-            "llamacpp:kv_cache_usage_ratio 0.5\n"
             "llamacpp:predicted_tokens_seconds 85.0\n"
         )
         m = parse_snapshot(text)
@@ -3719,12 +3718,49 @@ class SnapshotParseTests(unittest.TestCase):
         self.assertEqual(m.generation_tokens, 800.0)
         self.assertEqual(m.requests_running, 2.0)
         self.assertEqual(m.requests_waiting, 0.0)
-        self.assertEqual(m.kv_cache_usage, 0.5)
+        self.assertIsNone(m.kv_cache_usage)  # llama-server exports no KV usage gauge
         self.assertEqual(m.gen_tps_gauge, 85.0)
         self.assertIsNone(m.ttft)
         self.assertIsNone(m.tpot)
         self.assertIsNone(m.prefix_hits)
         self.assertEqual(m.token_counters(), (500.0, 800.0))
+
+    def test_llamacpp_cache_hit_and_draft_acceptance(self) -> None:
+        from tui.common.metrics import parse_snapshot
+        from tui.common.monitor_render import MonitorState
+
+        def body(processed, cached, drafted, accepted):
+            # Names as exported by llama-server b11552; prompt_tokens_total excludes cached tokens.
+            return (
+                f"llamacpp:prompt_tokens_total {processed}\n"
+                f"llamacpp:prompt_tokens_cached_total {cached}\n"
+                "llamacpp:tokens_predicted_total 0\n"
+                f"llamacpp:spec_decode_num_draft_tokens_total {drafted}\n"
+                f"llamacpp:spec_decode_num_accepted_tokens_total {accepted}\n"
+            )
+
+        m = parse_snapshot(body(300, 100, 40, 30))
+        self.assertEqual((m.prefix_hits, m.prefix_queries), (100.0, 400.0))
+        self.assertEqual((m.draft_tokens, m.accepted_tokens), (40.0, 30.0))
+
+        state = MonitorState()
+        first = state.update(m, 0.0, 0.0)
+        self.assertAlmostEqual(first.prefix_rate, 0.25)
+        self.assertAlmostEqual(first.accept_rate, 0.75)
+        second = state.update(parse_snapshot(body(300, 500, 140, 40)), 2.0, 0.0)
+        self.assertAlmostEqual(second.prefix_rate, 1.0)   # the window, not the lifetime
+        self.assertAlmostEqual(second.accept_rate, 0.1)
+
+    def test_vllm_spec_decode_counters_feed_the_acceptance_rate(self) -> None:
+        from tui.common.metrics import parse_snapshot
+
+        m = parse_snapshot(
+            "vllm:spec_decode_num_draft_tokens_total 5\n"
+            "vllm:spec_decode_num_accepted_tokens_total 4\n"
+            "vllm:prompt_tokens_total 1\n"
+        )
+        self.assertEqual((m.draft_tokens, m.accepted_tokens), (5.0, 4.0))
+        self.assertIsNone(m.prefix_queries)  # vLLM reports prefix queries itself
 
     def test_empty_body_yields_all_none(self) -> None:
         from tui.common.metrics import parse_snapshot
