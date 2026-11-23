@@ -36,7 +36,6 @@ from tui.common.widgets import TextPromptModal
 
 LLAMA_SERVER_FLAGS: dict[str, tuple[str, str]] = {
     # 필수/핵심
-    "model-file":       ("GGUF 파일명 (hf_file 미설정 시 -hff 로 사용)", "my-model-Q4_K_M.gguf"),
     "alias":            ("/v1/models 에 노출될 모델 이름",       "my-model"),
     # 컨텍스트 / 레이어
     "ctx-size":         ("컨텍스트 길이 (tokens)",                "32768"),
@@ -273,7 +272,7 @@ class ConfigFormScreen(ModalScreen[str | None]):
             for key, value in self._initial_config.disabled_params.items():
                 self._add_param_row(key, format_config_param_value(value), enabled=False)
         else:
-            for key in ("model-file", "ctx-size", "n-gpu-layers"):
+            for key in ("ctx-size", "n-gpu-layers"):
                 ex = LLAMA_SERVER_FLAGS.get(key, ("", ""))[1]
                 self._add_param_row(key, ex)
         self._load_server_flags()
@@ -409,7 +408,7 @@ class ConfigFormScreen(ModalScreen[str | None]):
                 return
             (params if switch.value else disabled_params)[key] = parsed
 
-        unknown = [k for k in params if k not in self._known_flags and k not in {"model-file", "extra-args"}] if self._known_flags else []
+        unknown = [k for k in params if k not in self._known_flags and k != "extra-args"] if self._known_flags else []
         if unknown:
             self.notify(
                 t(
@@ -629,7 +628,7 @@ class ConfigListScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#config-table", DataTable)
-        table.add_columns("Name", "Model File", "Ctx", "N-GPU-Layers", "Params")
+        table.add_columns("Name", "Alias", "Ctx", "N-GPU-Layers", "Params")
         self._refresh_table()
 
     def on_screen_resume(self) -> None:
@@ -642,11 +641,11 @@ class ConfigListScreen(Screen):
         table.clear()
         for name in list_config_names():
             cfg = load_config(name)
-            model_file = str(cfg.params.get("model-file", "—"))
+            alias = str(cfg.params.get("alias", "—"))
             ctx = str(cfg.params.get("ctx-size", "—"))
             ngl = str(cfg.params.get("n-gpu-layers", "—"))
             table.add_row(
-                cfg.name, model_file, ctx, ngl, str(len(cfg.params)), key=cfg.name
+                cfg.name, alias, ctx, ngl, str(len(cfg.params)), key=cfg.name
             )
 
     def _get_selected(self) -> str | None:

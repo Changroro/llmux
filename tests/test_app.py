@@ -575,8 +575,11 @@ class ProfileParityTests(unittest.IsolatedAsyncioTestCase):
         from tui.backends.llamacpp.screens import profile as screen_module
 
         saved = []
-        profile = backend.Profile(name="l", container_name="l", port=8124)
+        profile = backend.Profile(
+            name="l", container_name="l", port=8124, hf_repo="org/x", hf_file="m.gguf"
+        )
         with patch.object(screen_module, "list_config_names", return_value=[]), \
+            patch.object(backend, "list_repo_ggufs", AsyncMock(side_effect=AssertionError("unchanged source needs no HF lookup"))), \
             patch.object(screen_module, "save_profile", side_effect=saved.append):
             app = LlmuxApp()
             async with app.run_test(size=WIDE) as pilot:
@@ -589,6 +592,34 @@ class ProfileParityTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
         self.assertEqual(saved[0].env_vars, {"LLAMA_LOG_COLORS": "1"})
+
+    async def test_llamacpp_profile_form_requires_a_servable_gguf(self) -> None:
+        from textual.widgets import Input
+        from tui.backends.llamacpp import backend
+        from tui.backends.llamacpp.screens import profile as screen_module
+
+        saved = []
+        profile = backend.Profile(name="l", container_name="l", port=8124, hf_repo="org/x")
+        with patch.object(screen_module, "list_config_names", return_value=[]), \
+            patch.object(backend, "list_repo_ggufs", AsyncMock(return_value=["m.gguf"])), \
+            patch.object(screen_module, "save_profile", side_effect=saved.append):
+            app = LlmuxApp()
+            async with app.run_test(size=WIDE) as pilot:
+                await pilot.pause()
+                screen = screen_module.ProfileFormScreen(profile)
+                await app.push_screen(screen)
+                await pilot.pause()
+                screen.query_one("#save-btn").press()  # no HF File
+                await pilot.pause()
+                screen.query_one("#hf-file-input", Input).value = "other.gguf"
+                screen.query_one("#save-btn").press()  # not in the repo
+                await pilot.pause()
+                self.assertEqual(saved, [])
+                screen.query_one("#hf-file-input", Input).value = "m.gguf"
+                screen.query_one("#save-btn").press()
+                await pilot.pause()
+
+        self.assertEqual([p.hf_file for p in saved], ["m.gguf"])
 
     async def test_vllm_quick_setup_uses_custom_profile_name(self) -> None:
         from textual.widgets import Input
@@ -655,7 +686,7 @@ class LlamacppQuickSetupManualFileTests(unittest.IsolatedAsyncioTestCase):
                 config = screen_module.load_config("manual-model")
                 self.assertIsNotNone(stored)
                 self.assertEqual(stored.hf_file, "model.gguf")
-                self.assertEqual(config.params["model-file"], "model.gguf")
+                self.assertNotIn("model-file", config.params)
 
 
 class ConfigFormRenameTests(unittest.IsolatedAsyncioTestCase):
@@ -1378,3 +1409,4 @@ class SystemScreenParityTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsNotNone(screen.query_one(selector))
                         app.pop_screen()
                         await pilot.pause()
+

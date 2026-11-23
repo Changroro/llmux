@@ -23,7 +23,6 @@ from tui.backends.llamacpp.backend import (
     GpuInfo,
     ROOT,
     _get_hf_cache_dir,
-    _get_model_dir,
     get_disk_usage,
     get_docker_images,
     get_gpu_info,
@@ -113,7 +112,7 @@ class SystemScreen(Screen):
                 yield RichLog(id="image-action-log", highlight=True)
             with TabPane(t("Containers", "컨테이너"), id="containers-tab"):
                 yield RichLog(id="container-info", highlight=True)
-            with TabPane(t("Disk / Model Dir", "디스크 / 모델 폴더"), id="disk-tab"):
+            with TabPane(t("Disk / HF Cache", "디스크 / HF 캐시"), id="disk-tab"):
                 yield RichLog(id="disk-info", highlight=True)
             with TabPane(t("Environment", "환경"), id="environment-tab"):
                 yield Horizontal(
@@ -277,18 +276,11 @@ class SystemScreen(Screen):
         log = self.query_one("#disk-info", RichLog)
         log.clear()
         try:
-            model_dir = _get_model_dir()
-            model_dir_exists = model_dir.exists()
-            files: list[tuple[Path, int]] = []
-            if model_dir_exists:
-                for path in model_dir.glob("*.gguf"):
-                    files.append((path, path.stat().st_size))
-                files.sort(key=lambda item: item[1], reverse=True)
             hf_cache_dir = _get_hf_cache_dir()
             cached = list_cached_gguf()
             from tui.cli.system import _nearest_existing_path
 
-            probe_path = _nearest_existing_path(model_dir)
+            probe_path = _nearest_existing_path(hf_cache_dir)
             used, avail, pct = await get_disk_usage(str(probe_path))
         except Exception as exc:
             log.write(f"[red]{exc}[/]")
@@ -300,20 +292,7 @@ class SystemScreen(Screen):
             return
 
         log.write(f"[b]Project root:[/b] {ROOT}")
-        log.write(f"[b]Model dir:[/b] {model_dir}")
         log.write("")
-
-        if model_dir_exists:
-            log.write(t(f"[b]GGUF files ({len(files)})[/b]", f"[b]GGUF 파일 ({len(files)} 개)[/b]"))
-            total = 0
-            for path, sz in files:
-                total += sz
-                log.write(f"  {path.name}  [dim]{sz / 1024**3:.1f} GB[/dim]")
-            log.write(t(f"  [dim]Total: {total / 1024**3:.1f} GB[/dim]", f"  [dim]합계: {total / 1024**3:.1f} GB[/dim]"))
-            log.write("")
-        else:
-            log.write(t(f"[yellow]Model directory does not exist: {model_dir}[/]", f"[yellow]모델 디렉토리 존재하지 않음: {model_dir}[/]"))
-            log.write("")
 
         log.write(t(f"[b]HF cache GGUF ({len(cached)})[/b]  [dim]{hf_cache_dir}[/dim]", f"[b]HF cache GGUF ({len(cached)} 개)[/b]  [dim]{hf_cache_dir}[/dim]"))
         if cached:

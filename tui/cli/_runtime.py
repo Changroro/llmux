@@ -55,7 +55,7 @@ def model_source(sp: profile_store.StoredProfile) -> str:
         except (OSError, ValueError):
             model = ""
         return model or sp.model_id or ""
-    return sp.hf_repo or sp.model_file or ""
+    return sp.hf_repo
 
 
 def run_async(coro):

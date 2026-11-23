@@ -26,7 +26,9 @@ from tui.backends.llamacpp.backend import (
     Profile,
     list_config_names,
     HfListingUnavailable,
+    group_gguf_entries,
     list_hf_repo_files,
+    pick_gguf_for_quant,
     list_profile_names as list_profile_names,
     load_config,
     save_config,
@@ -51,8 +53,14 @@ _MOE_PATTERN = re.compile(r"[Aa][0-9]+B")
 _DEFAULT_OT = ".ffn_.*_exps.=CPU"
 
 
+def _quant_of(raw: str) -> str:
+    """`org/name:Q4_K_M` 의 quant 태그 (없으면 "")."""
+    tail = raw.strip().rstrip("/").rsplit("/", 1)[-1]
+    return tail.partition(":")[2]
+
+
 def _normalize_repo(raw: str) -> str:
-    """huggingface.co URL 이면 repo 경로만 추출."""
+    """huggingface.co URL 이면 repo 경로만 추출하고 `:QUANT` 꼬리는 뗀다."""
     s = raw.strip()
     if not s:
         return ""
@@ -63,8 +71,8 @@ def _normalize_repo(raw: str) -> str:
             s = s[len("api/models/"):]
     parts = s.split("/")
     if len(parts) >= 2:
-        return f"{parts[0]}/{parts[1]}"
-    return s
+        s = f"{parts[0]}/{parts[1]}"
+    return s.split(":", 1)[0]
 
 
 class QuickSetupScreen(ModalScreen[str]):
@@ -153,7 +161,7 @@ class QuickSetupScreen(ModalScreen[str]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._last_repo = ""
+        self._last_repo = ""  # repo plus :QUANT, as fetched
         self._listing_failed = False
 
     def compose(self) -> ComposeResult:
@@ -316,13 +324,13 @@ class QuickSetupScreen(ModalScreen[str]):
         if not repo or not _REPO_RE.match(repo):
             self.notify(t("Not a valid HF repo path (org/name)", "유효한 HF repo 경로가 아님 (org/name)"), severity="error")
             return
-        self._last_repo = repo
+        self._last_repo = f"{repo}:{_quant_of(repo_raw)}"
         info = self.query_one("#gguf-info", Static)
         info.update(t(f"[dim]Fetching file list for {repo}...[/dim]", f"[dim]{repo} 파일 목록 가져오는 중...[/dim]"))
-        self._fetch_files(repo)
+        self._fetch_files(repo, _quant_of(repo_raw))
 
     @work(exclusive=True, group="hf-fetch")
-    async def _fetch_files(self, repo: str) -> None:
+    async def _fetch_files(self, repo: str, quant: str = "") -> None:
         info = self.query_one("#gguf-info", Static)
         try:
             files = await list_hf_repo_files(repo)
@@ -343,29 +351,29 @@ class QuickSetupScreen(ModalScreen[str]):
         manual = self.query_one("#manual-file-input", Input)
         manual.value = ""
         manual.disabled = True
-        gguf_items = [
-            f for f in files
-            if isinstance(f, dict)
-            and f.get("type") == "file"
-            and str(f.get("path", "")).lower().endswith(".gguf")
-        ]
+        rows = [row for row in group_gguf_entries(files) if not row["mmproj"]]
         select = self.query_one("#gguf-select", Select)
-        if not gguf_items:
+        if not rows:
             info.update(t("[red]No GGUF files (or private repo — check HF_TOKEN)[/red]", "[red]GGUF 파일 없음 (또는 private repo — HF_TOKEN 확인)[/red]"))
             select.set_options([(t("(none)", "(없음)"), "__none__")])
             return
 
         opts: list[tuple[str, str]] = []
-        for f in sorted(gguf_items, key=lambda x: str(x.get("path", ""))):
-            path = str(f.get("path", ""))
-            size = f.get("size") or 0
-            size_gb = size / 1024**3 if isinstance(size, (int, float)) else 0
-            label = f"{path}  ({size_gb:.1f} GB)" if size_gb else path
-            opts.append((label, path))
+        for row in rows:
+            size_gb = row["size_bytes"] / 1024**3
+            shards = f", {row['shards']} shards" if row["shards"] > 1 else ""
+            label = f"{row['file']}  ({size_gb:.1f} GB{shards})" if size_gb else row["file"]
+            opts.append((label, row["file"]))
         select.set_options(opts)
-        select.value = opts[0][1]
+        chosen = opts[0][1]
+        if quant:
+            try:
+                chosen = pick_gguf_for_quant(repo, quant, [row["file"] for row in rows])
+            except ValueError as exc:
+                self.notify(str(exc), severity="warning", timeout=10)
+        select.value = chosen
         info.update(t(f"[green]{len(opts)} GGUF files[/green]", f"[green]{len(opts)} 개 GGUF 파일[/green]"))
-        self._update_moe_hint(opts[0][1])
+        self._update_moe_hint(chosen)
 
 
     @on(Select.Changed, "#gguf-select")
@@ -427,7 +435,8 @@ class QuickSetupScreen(ModalScreen[str]):
 
     @on(Button.Pressed, "#create-btn")
     def on_create(self) -> None:
-        repo = _normalize_repo(self.query_one("#repo-input", Input).value)
+        repo_raw = self.query_one("#repo-input", Input).value
+        repo = _normalize_repo(repo_raw)
         gguf_select = self.query_one("#gguf-select", Select)
         gguf_file = (
             str(gguf_select.value)
@@ -452,11 +461,11 @@ class QuickSetupScreen(ModalScreen[str]):
         if not repo or not _REPO_RE.match(repo):
             self.notify(t("A valid HF repo is required", "유효한 HF repo 필요"), severity="error")
             return
-        if self._last_repo and repo != self._last_repo:
+        if self._last_repo and f"{repo}:{_quant_of(repo_raw)}" != self._last_repo:
             self.notify(
                 t(
-                    "The repo changed after Fetch; fetch its GGUF files again",
-                    "Fetch 후 repo 가 변경되었습니다. GGUF 파일을 다시 가져오세요",
+                    "The repo or quant changed after Fetch; fetch its GGUF files again",
+                    "Fetch 후 repo 또는 quant 가 변경되었습니다. GGUF 파일을 다시 가져오세요",
                 ),
                 severity="error",
             )
@@ -502,8 +511,8 @@ class QuickSetupScreen(ModalScreen[str]):
             if copy_sel.value not in (Select.NULL, Select.BLANK, None)
             else ""
         )
-        updates: dict[str, Any] = {"model-file": gguf_file}
-        removals: set[str] = set()
+        updates: dict[str, Any] = {}
+        removals: set[str] = {"model-file"}
         for key, raw, label in (
             ("ctx-size", ctx, "Ctx size"),
             ("n-gpu-layers", ngl, "N-GPU-Layers"),
@@ -528,14 +537,9 @@ class QuickSetupScreen(ModalScreen[str]):
             updates["cache-type-v"] = ctv
         else:
             removals.add("cache-type-v")
-        if flash_attn:
-            updates["flash-attn"] = True
-        else:
-            removals.add("flash-attn")
-        if jinja:
-            updates["jinja"] = True
-        else:
-            removals.add("jinja")
+        # Explicit false: llama-server turns jinja on and flash-attn to auto when absent.
+        updates["flash-attn"] = flash_attn
+        updates["jinja"] = jinja
         if ot:
             updates["override-tensors"] = [ot]
         else:
@@ -571,7 +575,6 @@ class QuickSetupScreen(ModalScreen[str]):
                     port=port_num,
                     gpu_id=gpu,
                     config_name=final_name,
-                    model_file=gguf_file,
                     hf_repo=repo,
                     hf_file=gguf_file,
                 )

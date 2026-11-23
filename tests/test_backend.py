@@ -414,14 +414,14 @@ class ProfileStoreYamlTests(unittest.TestCase):
             profile = profile_store.StoredProfile(
                 name="p",
                 backend="llamacpp",
-                model_file="$(touch /tmp/llmux-pwned) model.gguf",
+                env_vars={"EXTRA": "$(touch /tmp/llmux-pwned) model.gguf"},
             )
 
             with patch("tui.common.profile_store.RUNTIME_DIR", root / ".runtime"):
                 path = profile_store.render_env(profile)
 
             rendered = path.read_text()
-            self.assertIn("MODEL_FILE='$(touch /tmp/llmux-pwned) model.gguf'", rendered)
+            self.assertIn("EXTRA='$(touch /tmp/llmux-pwned) model.gguf'", rendered)
 
     def test_render_env_rejects_invalid_env_var_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1896,26 +1896,6 @@ class ProbeFailureAndGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reference", events[0][1])
 
 
-class LlamacppDownloadedProbeTests(unittest.TestCase):
-    def test_model_file_only_without_hf_repo_is_not_downloaded(self) -> None:
-        # A model_file-only profile can't start (no hf_repo → render-override
-        # fails, MODEL_DIR isn't mounted), so it must not read as ready even if
-        # a matching file sits in ./models.
-        with tempfile.TemporaryDirectory() as tmp:
-            model_dir = Path(tmp)
-            (model_dir / "m.gguf").write_bytes(b"x" * 10)
-            stored = profile_store.StoredProfile(
-                name="lp", backend="llamacpp", port=8080, model_file="m.gguf",
-            )  # no hf_repo
-            with patch.object(lbackend, "_get_model_dir", lambda: model_dir), \
-                 patch.object(lbackend, "list_profile_names", lambda: ["lp"]), \
-                 patch.object(lbackend, "load_profile", lambda _n: lbackend._to_profile(stored)), \
-                 patch.object(lbackend, "find_cached_gguf", lambda *_a: None):
-                profiles = lbackend.list_profiles(running=set())
-        self.assertEqual(len(profiles), 1)
-        self.assertFalse(profiles[0].downloaded)
-
-
 class StreamContainerUpPortConflictTests(unittest.IsolatedAsyncioTestCase):
     async def test_vllm_invalid_one_off_image_stops_before_preflight(self) -> None:
         profile = backend.Profile(name="p", container_name="p", port="8000")
@@ -2432,7 +2412,7 @@ class LlamacppRuntimeImageTests(unittest.IsolatedAsyncioTestCase):
         async def no_gpu_conflicts(_profile):
             return []
 
-        async def render_ok(_name):
+        async def render_ok(_profile, _image):
             return 0, ""
 
         async def stop_at_compose(cmd, **_kwargs):
@@ -2451,7 +2431,7 @@ class LlamacppRuntimeImageTests(unittest.IsolatedAsyncioTestCase):
                 "_resolve_runtime_image": lambda *_args, **_kwargs: rt.LLAMACPP_OFFICIAL_IMAGE,
                 "_render_override": render_ok,
                 "_compose_env": lambda _profile: {},
-                "_compose_base_args": lambda _profile: ["docker", "compose"],
+                "_compose_base_args": lambda _profile, **_kw: ["docker", "compose"],
                 "_stream": stop_at_compose,
             },
         ):
@@ -2785,13 +2765,13 @@ class LlamacppPostStartValidationTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(
             lbackend_rt._post_start_validation.__globals__,
             {"_docker_run": fake_docker_run, "_models_endpoint_ready": fake_ready},
-        ):
+        ), tempfile.TemporaryDirectory() as cache:
             ok, messages, _ = await _drain_validation(
                 lbackend_rt._post_start_validation(
                     profile,
                     timeout=0.1,
                     poll_interval=0.02,
-                    hf_cache_path="/fake/cache",
+                    hf_cache_path=cache,
                 )
             )
 
@@ -3022,7 +3002,7 @@ class LlamacppStreamContainerUpTests(unittest.IsolatedAsyncioTestCase):
             state["builds"].append((a, kw))
             yield ("rc", 0)
 
-        async def fake_render_override(_name):
+        async def fake_render_override(_profile, _image):
             return (1, "<halt before compose>")
 
         async def no_conflict(_p):
@@ -3148,23 +3128,6 @@ class LlamacppRenderOverrideTests(unittest.TestCase):
         self.assertEqual(command[command.index("-hff") + 1], "model.gguf")
         self.assertNotIn("--model", command)
 
-    def test_profile_model_file_is_used_when_config_omits_model_file(self) -> None:
-        # When the config has no `model-file` and the profile carries no
-        # `hf_file`, the profile's `model_file` is the resolved -hff filename.
-        command = self.module.render_command(
-            {"ctx-size": 2048},
-            model_file="model.gguf",
-            hf_repo="org/repo",
-        )
-        self.assertEqual(command[command.index("-hff") + 1], "model.gguf")
-
-    def test_config_model_file_used_as_fallback(self) -> None:
-        command = self.module.render_command(
-            {"ctx-size": 2048, "model-file": "from-config.gguf"},
-            hf_repo="org/repo",
-        )
-        self.assertEqual(command[command.index("-hff") + 1], "from-config.gguf")
-
     def test_missing_model_file_fails_fast(self) -> None:
         with self.assertRaises(ValueError):
             self.module.render_command({"ctx-size": 2048}, hf_repo="org/repo")
@@ -3276,6 +3239,7 @@ class LlamacppRenderOverrideTests(unittest.TestCase):
             {"jinja": True, "cont-batching": True, "mlock": False},
             hf_repo="org/repo",
             hf_file="model.gguf",
+            known_flags={"jinja", "cont-batching", "mlock", "no-mlock"},
         )
         # Both `--jinja` and `--cont-batching` must appear as bare flags.
         self.assertIn("--jinja", command)
@@ -3285,8 +3249,9 @@ class LlamacppRenderOverrideTests(unittest.TestCase):
             idx = command.index(flag)
             next_token = command[idx + 1] if idx + 1 < len(command) else ""
             self.assertNotIn(next_token, {"on", "off", "true", "false", "True", "False"})
-        # False-valued bare bools are simply omitted.
+        # A false bool renders its negation, never the bare flag.
         self.assertNotIn("--mlock", command)
+        self.assertIn("--no-mlock", command)
 
     def test_host_and_port_from_config_are_dropped(self) -> None:
         # --host/--port are force-injected; a config that also sets them would
@@ -3358,13 +3323,12 @@ class OnboardingTests(unittest.TestCase):
         rendered = onboarding._render_env(
             {
                 "HF_CACHE_PATH": "/abs/cache",
-                "MODEL_DIR": "/abs/models",
                 "HF_TOKEN": "hf_secret",
             }
         )
         lines = rendered.splitlines()
         self.assertIn("HF_CACHE_PATH=/abs/cache", lines)
-        self.assertIn("MODEL_DIR=/abs/models", lines)
+        self.assertFalse(any(line.startswith("MODEL_DIR=") for line in lines))
         self.assertIn("HF_TOKEN=hf_secret", lines)
         # Unprompted keys are preserved (key kept, value not asserted to avoid
         # coupling to the template); comments survive.
@@ -3391,7 +3355,7 @@ class OnboardingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dpath = Path(d)
             ask = Mock(
-                side_effect=[str(dpath / "cache"), str(dpath / "models"), ""]
+                side_effect=[str(dpath / "cache"), ""]
             )
             with (
                 patch.object(onboarding, "COMMON_ENV", dpath / ".env.common"),
@@ -3402,13 +3366,12 @@ class OnboardingTests(unittest.TestCase):
             self.assertTrue(ok)
             written = (dpath / ".env.common").read_text()
             self.assertIn(f"HF_CACHE_PATH={dpath / 'cache'}", written)
-            self.assertIn(f"MODEL_DIR={dpath / 'models'}", written)
+            self.assertNotIn("MODEL_DIR", written)
             self.assertIn("HF_TOKEN=", written)
             self.assertEqual((dpath / ".env.common").stat().st_mode & 0o777, 0o600)
             # The bind-mount targets are pre-created so docker doesn't own them.
             self.assertTrue((dpath / "cache").is_dir())
-            self.assertTrue((dpath / "models").is_dir())
-            self.assertTrue(ask.call_args_list[2].kwargs["password"])
+            self.assertTrue(ask.call_args_list[1].kwargs["password"])
 
 
 class VersionCheckTests(unittest.TestCase):

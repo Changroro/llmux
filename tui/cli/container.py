@@ -644,10 +644,10 @@ def ps(
                     "port": int(s.port) if s.port else None,
                     "gpu": s.gpu_id,
                     "image": images.get(s.container_name),
-                    "model": s.model if bk == "vllm" else (stored.hf_repo or stored.model_file or ""),
+                    "model": s.model if bk == "vllm" else stored.hf_repo,
                 }
                 if bk == "llamacpp":
-                    row["hf_file"] = stored.hf_file or stored.model_file or ""
+                    row["hf_file"] = stored.hf_file
                 rows.append(row)
         probes = await asyncio.gather(
             *(

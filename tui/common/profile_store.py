@@ -232,7 +232,7 @@ class StoredProfile:
     lora_modules: str = ""
     extra_pip_packages: str = ""
     env_vars: dict[str, str] = field(default_factory=dict)
-    model_file: str = ""
+    model_file: str = ""  # legacy input only; migrate_gguf_sources folds it into hf_file
     hf_repo: str = ""
     hf_file: str = ""
     image_tag: str = ""
@@ -568,7 +568,13 @@ def _validate_profile(profile: StoredProfile) -> None:
                 f"profile {profile.name!r}: {field_name} must be a string"
             )
     if profile.backend == "llamacpp" and profile.hf_repo:
-        error = hf_repo_error(profile.hf_repo)
+        # `org/name:QUANT` is a pending quant selector that prepare/up resolve.
+        repo, sep, quant = profile.hf_repo.partition(":")
+        error = hf_repo_error(repo) or (
+            "HF quant tag must be letters, digits, '_', '-' or '.'"
+            if sep and not re.fullmatch(r"[A-Za-z0-9_.-]+", quant)
+            else ""
+        )
         if error:
             raise ValueError(f"profile {profile.name!r}: {error}")
     if profile.image_tag:
@@ -649,12 +655,12 @@ def _profile_to_entry(
         if profile.extra_pip_packages:
             out["extra_pip_packages"] = profile.extra_pip_packages
     else:
-        if profile.model_file:
-            out["model_file"] = profile.model_file
         if profile.hf_repo:
             out["hf_repo"] = profile.hf_repo
         if profile.hf_file:
             out["hf_file"] = profile.hf_file
+        elif profile.model_file:  # not migrated yet: keep the only copy of the GGUF name
+            out["model_file"] = profile.model_file
     if profile.env_vars:
         out["env_vars"] = dict(profile.env_vars)
     if profile.image_tag:
@@ -921,6 +927,57 @@ def _replace_profile_unlocked(
         modes={new_env: 0o600, PROFILES_YAML: 0o600},
     )
     return profile
+
+
+def patch_profiles(
+    backend: str, changes: dict[str, dict[str, Any]], extra_writes: dict[Path, str]
+) -> None:
+    """Set (None = delete) keys of the named entries plus `extra_writes`, all or nothing.
+
+    A ruamel round-trip edits only those keys, so the file's comments and
+    commented-out settings survive (the regular save path re-dumps the file).
+    """
+    from io import StringIO
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.util import load_yaml_guess_indent
+
+    from tui.common.config_markers import _delete_keeping_following_comment
+
+    with _storage_lock():
+        writes = dict(extra_writes)
+        if changes:
+            ry = YAML()
+            ry.preserve_quotes = True
+            ry.width = 10**9
+            text = PROFILES_YAML.read_text()
+            _, indent, offset = load_yaml_guess_indent(text)
+            offset = offset or 0
+            ry.indent(mapping=indent - offset or 2, sequence=indent, offset=offset)
+            data = ry.load(text)
+            entries = {
+                entry.get("name"): entry
+                for entry in data.get("profiles", [])
+                if isinstance(entry, dict) and entry.get("backend") == backend
+            }
+            for name, keys in changes.items():
+                if name not in entries:
+                    raise ValueError(f"profile {name!r} not found in backend {backend!r}")
+                for key, value in keys.items():
+                    if value is None:
+                        if key in entries[name]:
+                            _delete_keeping_following_comment(entries[name], key)
+                    else:
+                        entries[name][key] = value
+            buf = StringIO()
+            ry.dump(data, buf)
+            writes[PROFILES_YAML] = buf.getvalue()
+            plain = load_yaml_mapping(writes[PROFILES_YAML], PROFILES_YAML)
+            for profile in _validated_profiles(plain):
+                if profile.backend == backend and profile.name in changes:
+                    writes[runtime_env_path(profile.name, backend)] = "\n".join(_render_env_lines(profile))
+        if writes:
+            _replace_files(writes, modes={path: 0o600 for path in writes if path not in extra_writes})
 
 
 def rename_profile(old: str, new: str, backend: str) -> StoredProfile:
@@ -1203,8 +1260,6 @@ def _render_env_lines(profile: StoredProfile) -> list[str]:
             _env_line("GPU_ID", profile.gpu_id),
             _env_line("CONFIG_NAME", profile.config_name or profile.name),
         ]
-        if profile.model_file:
-            lines.append(_env_line("MODEL_FILE", profile.model_file))
         if profile.hf_repo:
             lines.append(_env_line("HF_REPO", profile.hf_repo))
         if profile.hf_file:

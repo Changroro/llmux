@@ -168,7 +168,7 @@ llmux --version            # print the installed version and exit</code></pre>
         <tr><td><code>image build-dev</code></td><td>streamed build log</td><td>log on stderr; result object with the image</td></tr>
       </tbody>
     </table>
-    <p>Write and lifecycle commands share one record shape: <code>{"ok": true, "code": 0, …}</code> on success and <code>{"ok": false, "code": N, "error": "…"}</code> on failure — including usage errors, which a <code>--json</code> run still reports as a record on stdout. Human-readable progress and every <code>Error</code>/<code>Warning</code> line go to stderr, so stdout holds only the record. In <code>ps</code>, <code>profile list</code> and <code>profile show</code>, <code>port</code> is always an integer and <code>model</code> is the weights source on both backends: the vLLM config <code>model</code>, or the llama.cpp <code>hf_repo</code> / <code>model_file</code> (with <code>hf_file</code> alongside).</p>
+    <p>Write and lifecycle commands share one record shape: <code>{"ok": true, "code": 0, …}</code> on success and <code>{"ok": false, "code": N, "error": "…"}</code> on failure — including usage errors, which a <code>--json</code> run still reports as a record on stdout. Human-readable progress and every <code>Error</code>/<code>Warning</code> line go to stderr, so stdout holds only the record. In <code>ps</code>, <code>profile list</code> and <code>profile show</code>, <code>port</code> is always an integer and <code>model</code> is the weights source on both backends: the vLLM config <code>model</code>, or the llama.cpp <code>hf_repo</code> (with <code>hf_file</code> alongside).</p>
 
     <h3 id="exit-codes">Exit codes</h3>
     <p>Every command uses the same codes, so scripts can branch on them without parsing text:</p>
@@ -327,7 +327,7 @@ uv run llmux container logs qwen3-0-6b -n 50 --no-follow</code></pre>
       </tbody>
     </table>
     <p>Table columns: <code>backend</code>, <code>profile</code>, <code>status</code>, <code>ready</code>, <code>port</code>, <code>gpu</code>, <code>container</code>, <code>model</code>. JSON rows also include <code>running</code>, <code>health</code> (Docker healthcheck or <code>null</code>), <code>ready</code> (the server answers <code>/v1/models</code>), <code>served_models</code>, <code>ready_error</code> (only when <code>ready</code> is <code>null</code>: the server answered wrongly or its API key could not be read), <code>image</code> (the image the container was created from, or <code>null</code>) and, for llama.cpp, <code>hf_file</code>. <code>port</code> is an integer.</p>
-    <p>Status preserves Docker lifecycle and health: <code>healthy</code>, <code>unhealthy</code>, <code>starting</code>, <code>running</code>, <code>paused</code>, <code>restarting</code>, <code>removing</code>, <code>created</code>, <code>exited</code>, <code>dead</code>, <code>unknown</code>, or <code>stopped</code>. <code>model</code> is the weights source: the vLLM config's <code>model</code> (then profile <code>model_id</code>), or the llama.cpp <code>hf_repo</code> (then <code>model_file</code>). The served alias shows up in <code>served_models</code>.</p>
+    <p>Status preserves Docker lifecycle and health: <code>healthy</code>, <code>unhealthy</code>, <code>starting</code>, <code>running</code>, <code>paused</code>, <code>restarting</code>, <code>removing</code>, <code>created</code>, <code>exited</code>, <code>dead</code>, <code>unknown</code>, or <code>stopped</code>. <code>model</code> is the weights source: the vLLM config's <code>model</code> (then profile <code>model_id</code>), or the llama.cpp <code>hf_repo</code>. The served alias shows up in <code>served_models</code>.</p>
     <pre data-lang="bash"><code>uv run llmux ps
 uv run llmux ps --running --json
 uv run llmux container ps -b vllm</code></pre>
@@ -447,9 +447,9 @@ uv run llmux profile list -b vllm --json</code></pre>
         <tr><td><code>--lora-modules</code></td><td><code>""</code></td><td>vLLM</td><td>Comma-separated <code>name=path</code> adapter mappings.</td></tr>
         <tr><td><code>--extra-pip</code></td><td><code>""</code></td><td>vLLM</td><td>Extra pip packages installed before serve. (First-class profile field — <strong>do not</strong> pass via <code>--set EXTRA_PIP_PACKAGES=…</code>.)</td></tr>
         <tr><td><code>--set</code></td><td><em>(none)</em></td><td>both</td><td>Repeatable: <code>KEY=VALUE</code> entries appended to <code>env_vars</code>. Key must be a valid env-var name and <strong>cannot</strong> shadow a reserved profile field or protected Hugging Face/Docker/Compose control key. Use the dedicated profile option instead.</td></tr>
-        <tr><td><code>--model-file</code></td><td><code>""</code></td><td>llama.cpp</td><td>GGUF filename.</td></tr>
-        <tr><td><code>--hf-repo</code></td><td><code>""</code></td><td>llama.cpp</td><td>Hugging Face repo for download.</td></tr>
-        <tr><td><code>--hf-file</code></td><td><code>""</code></td><td>llama.cpp</td><td>HF file for download.</td></tr>
+        <tr><td><code>--image-tag</code></td><td><code>""</code></td><td>both</td><td>Docker image override (e.g. <code>llamacpp-dev:mtp_main</code>). Empty = backend default.</td></tr>
+        <tr><td><code>--hf-repo</code></td><td><code>""</code></td><td>llama.cpp</td><td>Required. Hugging Face repo, or <code>org/name:QUANT</code> to pick the GGUF by quant tag.</td></tr>
+        <tr><td><code>--hf-file</code></td><td><code>""</code></td><td>llama.cpp</td><td>GGUF file inside the repo (first shard if split); required unless <code>--hf-repo</code> has <code>:QUANT</code>. Checked against the repo listing when Hugging Face is reachable.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code># vLLM profile
@@ -458,8 +458,14 @@ uv run llmux profile new qwen3-8b --backend vllm --model Qwen/Qwen3-8B \
 
 # llama.cpp profile
 uv run llmux profile new gemma-3-4b --backend llamacpp --port 8080 \
-    --model-file gemma-3-4b-it-q4_k_m.gguf \
-    --hf-repo unsloth/gemma-3-4b-it-GGUF --hf-file gemma-3-4b-it-q4_k_m.gguf</code></pre>
+    --hf-repo unsloth/gemma-3-4b-it-GGUF --hf-file gemma-3-4b-it-q4_k_m.gguf
+
+# llama.cpp profile, file picked by quant tag
+uv run llmux profile new gemma-q8 --backend llamacpp --hf-repo unsloth/gemma-3-4b-it-GGUF:Q8_0</code></pre>
+
+    <h3 id="profile-gguf-files"><code>profile gguf-files</code></h3>
+    <p>List a repo's servable GGUF files — the values <code>--hf-file</code> accepts. Split GGUFs appear once (their first shard) with the summed size; mmproj projector files are flagged. Mirrors the TUI Quick Setup file dropdown. Exits 1 when Hugging Face cannot be reached.</p>
+    <pre data-lang="text"><code>llmux profile gguf-files REPO [--json]</code></pre>
 
     <h3 id="profile-edit"><code>profile edit</code></h3>
     <p>Edit fields of an existing profile. <strong>Only the options you pass change</strong>; everything else is left untouched.</p>
@@ -485,9 +491,8 @@ uv run llmux profile new gemma-3-4b --backend llamacpp --port 8080 \
         <tr><td><code>--extra-pip</code></td><td>vLLM</td><td>Extra pip packages.</td></tr>
         <tr><td><code>--set</code></td><td>both</td><td>Repeatable: <code>KEY=VALUE</code> to add/override in <code>env_vars</code>. Protected Hugging Face/Docker/Compose control keys are rejected.</td></tr>
         <tr><td><code>--unset</code></td><td>both</td><td>Repeatable: <code>KEY</code> to remove from <code>env_vars</code>.</td></tr>
-        <tr><td><code>--model-file</code></td><td>llama.cpp</td><td>New GGUF filename.</td></tr>
-        <tr><td><code>--hf-repo</code></td><td>llama.cpp</td><td>New HF download repo.</td></tr>
-        <tr><td><code>--hf-file</code></td><td>llama.cpp</td><td>New HF download file.</td></tr>
+        <tr><td><code>--hf-repo</code></td><td>llama.cpp</td><td>New HF repo, or <code>org/name:QUANT</code> (re-picks the file unless <code>--hf-file</code> is also passed).</td></tr>
+        <tr><td><code>--hf-file</code></td><td>llama.cpp</td><td>New GGUF file; checked against the repo listing when reachable.</td></tr>
         <tr><td><code>--image-tag</code></td><td>both</td><td>Docker image override (e.g. <code>llamacpp-dev:mtp_main</code>). Pass an empty string to clear.</td></tr>
       </tbody>
     </table>

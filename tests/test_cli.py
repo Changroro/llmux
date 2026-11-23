@@ -61,8 +61,11 @@ def _make_temp_project() -> Path:
     return tmp
 
 
+_OFFLINE_HF = {"HF_ENDPOINT": "http://127.0.0.1:9"}
+
+
 def _run_cli(tmp: Path, *args: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, "LLMUX_ROOT": str(tmp), "NO_COLOR": "1"}
+    env = {**os.environ, **_OFFLINE_HF, "LLMUX_ROOT": str(tmp), "NO_COLOR": "1"}
     return subprocess.run(
         [sys.executable, "-m", "tui", *args],
         cwd=REPO_ROOT,
@@ -78,6 +81,7 @@ def _run_cli_with_env(
 ) -> subprocess.CompletedProcess:
     env = {
         **os.environ,
+        **_OFFLINE_HF,
         **extra_env,
         "LLMUX_ROOT": str(tmp),
         "NO_COLOR": "1",
@@ -701,7 +705,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_new_rejects_privileged_port(self):
         r = _run_cli(
             self.tmp, "profile", "new", "p80", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "80",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "80",
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("1024", r.stderr + r.stdout)
@@ -711,7 +715,7 @@ class CliSmokeTests(unittest.TestCase):
         # at one digit, making hosts with 10+ GPUs unaddressable.
         r = _run_cli(
             self.tmp, "profile", "new", "gpu10", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "8099", "--gpu-id", "0,10",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8099", "--gpu-id", "0,10",
         )
         self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
 
@@ -723,10 +727,124 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_new_rejects_malformed_gpu_id(self):
         r = _run_cli(
             self.tmp, "profile", "new", "gpubad", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "8098", "--gpu-id", "0,,",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8098", "--gpu-id", "0,,",
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("GPU id", r.stderr + r.stdout)
+
+    def test_llamacpp_profile_new_requires_hf_repo_and_file(self):
+        # A llama.cpp profile without both can never start; fail at creation.
+        for args in (["--hf-repo", "org/x"], ["--hf-file", "x.gguf"]):
+            r = _run_cli(self.tmp, "profile", "new", "nohf", "--backend", "llamacpp", *args)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("--hf-", r.stderr + r.stdout)
+
+    def test_llamacpp_profile_new_and_edit_check_file_against_repo(self):
+        bad = _run_cli_stubbed_hf(
+            self.tmp, ["a.gguf"], "profile", "new", "chk", "--backend", "llamacpp",
+            "--hf-repo", "org/x", "--hf-file", "b.gguf",
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("not found", bad.stderr + bad.stdout)
+        ok = _run_cli_stubbed_hf(
+            self.tmp, ["a.gguf"], "profile", "new", "chk", "--backend", "llamacpp",
+            "--hf-repo", "org/x", "--hf-file", "a.gguf",
+        )
+        self.assertEqual(ok.returncode, 0, ok.stderr or ok.stdout)
+        edit = _run_cli_stubbed_hf(
+            self.tmp, ["a.gguf"], "profile", "edit", "chk", "--hf-file", "b.gguf",
+        )
+        self.assertNotEqual(edit.returncode, 0)
+        self.assertIn("not found", edit.stderr + edit.stdout)
+        _run_cli(self.tmp, "profile", "delete", "chk", "-y")
+
+    def test_legacy_gguf_fields_are_migrated_on_any_command(self):
+        data = yaml.safe_load((self.tmp / "profiles.yaml").read_text())
+        data["profiles"].append(
+            {"name": "legacy", "backend": "llamacpp", "port": 8095,
+             "hf_repo": "org/x", "model_file": "old.gguf"}
+        )
+        (self.tmp / "profiles.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+        (self.tmp / "config" / "llamacpp" / "legacy.yaml").write_text(
+            "# tuned\nmodel-file: cfg.gguf\nctx-size: 4096\n"
+        )
+        r = _run_cli(self.tmp, "profile", "list", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("legacy", r.stderr)  # the migration says what it changed
+        raw = next(
+            p for p in yaml.safe_load((self.tmp / "profiles.yaml").read_text())["profiles"]
+            if p["name"] == "legacy"
+        )
+        self.assertEqual(raw["hf_file"], "cfg.gguf")
+        self.assertNotIn("model_file", raw)
+        cfg = (self.tmp / "config" / "llamacpp" / "legacy.yaml").read_text()
+        self.assertNotIn("model-file", cfg)
+        self.assertIn("# tuned", cfg)
+        again = _run_cli(self.tmp, "profile", "list", "--json")
+        self.assertNotIn("hf_file", again.stderr)
+        _run_cli(self.tmp, "profile", "delete", "legacy", "--with-config", "-y")
+
+    def test_llamacpp_quant_tag_resolves_to_a_file(self):
+        r = _run_cli_stubbed_hf(
+            self.tmp, ["X-Q4_K_M.gguf", "X-Q8_0.gguf"],
+            "profile", "new", "qtag", "--backend", "llamacpp", "--port", "8094",
+            "--hf-repo", "org/X-GGUF:q8_0",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
+        data = json.loads(_run_cli(self.tmp, "profile", "show", "qtag", "--json").stdout)
+        self.assertEqual((data["hf_repo"], data["hf_file"]), ("org/X-GGUF", "X-Q8_0.gguf"))
+        _run_cli(self.tmp, "profile", "delete", "qtag", "-y")
+
+    def test_llamacpp_quant_tag_stays_pending_offline(self):
+        r = _run_cli(
+            self.tmp, "profile", "new", "qoff", "--backend", "llamacpp", "--port", "8093",
+            "--hf-repo", "org/X-GGUF:Q4_K_M",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
+        self.assertIn("prepare", r.stderr)
+        data = json.loads(_run_cli(self.tmp, "profile", "show", "qoff", "--json").stdout)
+        self.assertEqual((data["hf_repo"], data["hf_file"]), ("org/X-GGUF:Q4_K_M", ""))
+        _run_cli(self.tmp, "profile", "delete", "qoff", "-y")
+
+    def test_gguf_files_lists_entry_ggufs(self):
+        r = _run_cli_stubbed_hf(
+            self.tmp,
+            ["X-Q4_K_M.gguf", "Q8/X-00001-of-00002.gguf", "Q8/X-00002-of-00002.gguf", "mmproj-F16.gguf"],
+            "profile", "gguf-files", "org/X-GGUF", "--json",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = json.loads(r.stdout)
+        self.assertEqual(
+            [(row["file"], row["shards"], row["mmproj"]) for row in rows],
+            [("Q8/X-00001-of-00002.gguf", 2, False), ("X-Q4_K_M.gguf", 1, False), ("mmproj-F16.gguf", 1, True)],
+        )
+        offline = _run_cli(self.tmp, "profile", "gguf-files", "org/X-GGUF", "--json")
+        self.assertEqual(offline.returncode, 1)
+        self.assertEqual(json.loads(offline.stdout)["status"], "error")
+
+    def test_llamacpp_model_file_option_is_gone(self):
+        r = _run_cli(
+            self.tmp, "profile", "new", "mf", "--backend", "llamacpp",
+            "--hf-repo", "org/x", "--model-file", "x.gguf",
+        )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--model-file", r.stderr)
+
+    def test_profile_new_accepts_image_tag(self):
+        r = _run_cli(
+            self.tmp, "profile", "new", "imgtag", "--backend", "llamacpp",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8096",
+            "--image-tag", "llamacpp-dev:mtp",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
+        show = _run_cli(self.tmp, "profile", "show", "imgtag", "--json")
+        self.assertEqual(json.loads(show.stdout)["image_tag"], "llamacpp-dev:mtp")
+        bad = _run_cli(
+            self.tmp, "profile", "new", "imgbad", "--backend", "vllm",
+            "--image-tag", "UPPER CASE",
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        _run_cli(self.tmp, "profile", "delete", "imgtag", "-y")
 
     def test_profile_new_rejects_name_used_by_other_backend(self):
         # Global name uniqueness (finding #1): `lcpp` already exists as a
@@ -743,7 +861,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_edit_rejects_bad_port(self):
         created = _run_cli(
             self.tmp, "profile", "new", "editport", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "8097",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8097",
         )
         self.assertEqual(created.returncode, 0, created.stderr or created.stdout)
 
@@ -949,7 +1067,7 @@ class CliSmokeTests(unittest.TestCase):
         # flag) was both false and self-contradictory.
         created = _run_cli(
             self.tmp, "profile", "new", "tplc", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "8091", "--gpu-id", "0",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8091", "--gpu-id", "0",
         )
         self.assertEqual(created.returncode, 0, created.stderr or created.stdout)
 
@@ -966,7 +1084,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_new_rejects_tensor_parallel_on_llamacpp(self):
         r = _run_cli(
             self.tmp, "profile", "new", "tp3", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "8092", "--tensor-parallel", "2",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8092", "--tensor-parallel", "2",
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--tensor-parallel", r.stderr + r.stdout)
@@ -976,7 +1094,7 @@ class CliSmokeTests(unittest.TestCase):
         # These used to be accepted and silently dropped by _profile_to_entry.
         r = _run_cli(
             self.tmp, "profile", "new", "xbk1", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--model", "org/some-model",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--model", "org/some-model",
         )
         self.assertNotEqual(r.returncode, 0)
         out = r.stderr + r.stdout
@@ -986,7 +1104,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_new_rejects_llamacpp_only_option_on_vllm(self):
         r = _run_cli(
             self.tmp, "profile", "new", "xbk2", "--backend", "vllm",
-            "--model", "org/m", "--hf-repo", "org/x",
+            "--model", "org/m", "--hf-repo", "org/x", "--hf-file", "x.gguf",
         )
         self.assertNotEqual(r.returncode, 0)
         out = r.stderr + r.stdout
@@ -996,7 +1114,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_edit_rejects_cross_backend_option(self):
         created = _run_cli(
             self.tmp, "profile", "new", "xbk3", "--backend", "llamacpp",
-            "--hf-repo", "org/x",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf",
         )
         self.assertEqual(created.returncode, 0, created.stderr or created.stdout)
 
@@ -1029,7 +1147,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_profile_new_rejects_invalid_container_name(self):
         r = _run_cli(
             self.tmp, "profile", "new", "ctr1", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--container", "Bad_Name",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--container", "Bad_Name",
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--container", r.stderr + r.stdout)
@@ -1159,7 +1277,7 @@ class CliSmokeTests(unittest.TestCase):
 
             r = _run_cli(
                 tmp, "profile", "new", "userdef", "--backend", "llamacpp",
-                "--hf-repo", "org/x", "--port", "0",
+                "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "0",
             )
             self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
             show = _run_cli(tmp, "profile", "show", "userdef", "--json")
@@ -1183,7 +1301,7 @@ class CliSmokeTests(unittest.TestCase):
         # (which would render `LLAMA_PORT=0` into the runtime .env).
         created = _run_cli(
             self.tmp, "profile", "new", "portzero", "--backend", "llamacpp",
-            "--hf-repo", "org/x", "--port", "8096",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf", "--port", "8096",
         )
         self.assertEqual(created.returncode, 0, created.stderr or created.stdout)
 
@@ -1375,22 +1493,22 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(data["port"], 8087)
         self.assertEqual(data["hf_repo"], "fake/Model-GGUF")
         self.assertEqual(data["hf_file"], "model-Q4_K_M.gguf")
-        self.assertEqual(data["model_file"], "model-Q4_K_M.gguf")
 
         # Config written through llamacpp backend save_config — verify the
         # key set + ints are typed (not str).
         cfg_path = self.tmp / "config" / "llamacpp" / "lc-smoke.yaml"
         self.assertTrue(cfg_path.exists(), cfg_path)
         cfg = yaml.safe_load(cfg_path.read_text())
-        self.assertEqual(cfg.get("model-file"), "model-Q4_K_M.gguf")
+        self.assertNotIn("model-file", cfg)
         self.assertEqual(cfg.get("alias"), "lc-smoke")
         self.assertEqual(cfg.get("ctx-size"), 1024)
         self.assertEqual(cfg.get("n-gpu-layers"), 0)
         self.assertEqual(cfg.get("cache-type-k"), "f16")
         self.assertEqual(cfg.get("cache-type-v"), "f16")
-        # --no-flash-attn / --no-jinja → keys must NOT be present.
-        self.assertNotIn("flash-attn", cfg)
-        self.assertNotIn("jinja", cfg)
+        # --no-flash-attn / --no-jinja must turn both off: llama-server
+        # enables jinja and auto flash-attn when the key is absent.
+        self.assertIs(cfg.get("flash-attn"), False)
+        self.assertIs(cfg.get("jinja"), False)
         # Cleanup.
         _run_cli(self.tmp, "profile", "delete", "lc-smoke", "-y")
 

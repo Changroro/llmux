@@ -89,12 +89,6 @@ def run_onboarding() -> bool:
             default=str(Path.home() / ".cache" / "huggingface"),
             console=console,
         )
-        model_dir = Prompt.ask(
-            "llama.cpp GGUF model directory (legacy detection / disk view only — "
-            "no longer mounted into the container)",
-            default=str(PROJECT_ROOT / "models"),
-            console=console,
-        )
         hf_token = Prompt.ask(
             "HuggingFace token (optional — needed for gated models)",
             default="",
@@ -106,16 +100,10 @@ def run_onboarding() -> bool:
         return False
 
     hf_cache_path = str(Path(hf_cache).expanduser())
-    model_dir_path = str(Path(model_dir).expanduser())
 
     if not os.path.isabs(hf_cache_path):
         console.print(
             f"[red]HF_CACHE_PATH must be an absolute path:[/red] {hf_cache_path}"
-        )
-        return False
-    if not os.path.isabs(model_dir_path):
-        console.print(
-            f"[red]MODEL_DIR must be an absolute path:[/red] {model_dir_path}"
         )
         return False
 
@@ -124,7 +112,6 @@ def run_onboarding() -> bool:
             _render_env(
                 {
                     "HF_CACHE_PATH": hf_cache_path,
-                    "MODEL_DIR": model_dir_path,
                     "HF_TOKEN": hf_token.strip(),
                 }
             )
@@ -134,14 +121,13 @@ def run_onboarding() -> bool:
         return False
 
     # Pre-create bind targets before Docker can create root-owned directories.
-    for path in (hf_cache_path, model_dir_path):
-        try:
-            Path(path).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            console.print(
-                f"[yellow]⚠ Could not create {path}: {exc}[/yellow]\n"
-                "[yellow]  Create it yourself before starting a container.[/yellow]"
-            )
+    try:
+        Path(hf_cache_path).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        console.print(
+            f"[yellow]⚠ Could not create {hf_cache_path}: {exc}[/yellow]\n"
+            "[yellow]  Create it yourself before starting a container.[/yellow]"
+        )
 
     ok, messages = validate_common_env(COMMON_ENV)
     if not ok:

@@ -103,7 +103,7 @@ def dump_active_config(existing_text: str | None, data: dict[str, Any]) -> str:
     def merge(target, values):
         if isinstance(target, dict) and isinstance(values, dict):
             for key in [k for k in target if k not in values]:
-                del target[key]
+                _delete_keeping_following_comment(target, key)
             for key, value in values.items():
                 target[key] = merge(target.get(key), value)
             return target
@@ -122,6 +122,39 @@ def dump_active_config(existing_text: str | None, data: dict[str, Any]) -> str:
     buf = StringIO()
     ry.dump(existing, buf)
     return buf.getvalue()
+
+
+def _delete_keeping_following_comment(mapping: Any, key: Any) -> None:
+    """Delete `key` from a ruamel mapping without losing the comment lines below it.
+
+    ruamel stores the lines between a value and the next key as that key's
+    trailing comment, so a plain delete would take them along.
+    """
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    keys = list(mapping)
+    index = keys.index(key)
+    slot = mapping.ca.items.pop(key, None)
+    del mapping[key]
+    post = slot[2] if slot else None
+    # The text before the first newline is the deleted key's own inline comment.
+    tail = post.value.split("\n", 1)[1] if post is not None and "\n" in post.value else ""
+    if not tail.strip():
+        return
+    if index > 0:
+        prev = mapping.ca.items.setdefault(keys[index - 1], [None, None, None, None])
+        if prev[2] is None:
+            prev[2] = CommentToken("\n" + tail, CommentMark(0), None)
+        else:
+            prev[2].value += tail
+        return
+    if mapping.ca.comment is None:
+        mapping.ca.comment = [None, []]
+    if mapping.ca.comment[1] is None:
+        mapping.ca.comment[1] = []
+    for line in tail.splitlines():
+        mapping.ca.comment[1].append(CommentToken(line + "\n", CommentMark(0), None))
 
 
 def parse_disabled_markers(text: str) -> dict[str, Any]:

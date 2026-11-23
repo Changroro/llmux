@@ -105,9 +105,8 @@ profiles:                 # the list of profile entries
         <tr><td><code>lora_modules</code></td><td>string</td><td><code>""</code></td><td>vLLM</td><td>Comma-separated <code>name=path</code> adapters, e.g. <code>a1=/app/lora/p1,a2=/app/lora/p2</code>.</td></tr>
         <tr><td><code>extra_pip_packages</code></td><td>string</td><td><code>""</code></td><td>vLLM</td><td>Extra pip packages installed before <code>vllm serve</code>, e.g. <code>flash-attn==2.7.4.post1</code>.</td></tr>
         <tr><td><code>env_vars</code></td><td>map</td><td><code>{}</code></td><td>both</td><td>Arbitrary <code>KEY: VALUE</code> pairs appended to the rendered container env file. Keys must be valid env-var names. <code>HF_TOKEN</code>, <code>HF_ENDPOINT</code>, and keys prefixed with <code>DOCKER_</code> or <code>COMPOSE_</code> are rejected. Container settings such as <code>PATH</code>, <code>HTTP_PROXY</code>, <code>SSL_CERT_FILE</code>, and <code>LD_PRELOAD</code> remain allowed and are not promoted into the host Compose process.</td></tr>
-        <tr><td><code>model_file</code></td><td>string</td><td><code>""</code></td><td>llama.cpp</td><td>GGUF filename. Used for the download and as a config fallback.</td></tr>
-        <tr><td><code>hf_repo</code></td><td>string</td><td><code>""</code></td><td>llama.cpp</td><td>Hugging Face repo id <code>llama-server</code> downloads from (<code>-hf</code>).</td></tr>
-        <tr><td><code>hf_file</code></td><td>string</td><td><code>""</code></td><td>llama.cpp</td><td>Specific <code>.gguf</code> file inside <code>hf_repo</code> (<code>-hff</code>).</td></tr>
+        <tr><td><code>hf_repo</code></td><td>string</td><td><code>""</code></td><td>llama.cpp</td><td>Hugging Face repo id <code>llama-server</code> downloads from (<code>-hf</code>). Required. <code>org/name:QUANT</code> (e.g. <code>:Q4_K_M</code>) picks the file by quant tag; it is resolved to <code>hf_file</code> when the profile is saved, or by <code>prepare</code>/<code>up</code> if Hugging Face was unreachable then.</td></tr>
+        <tr><td><code>hf_file</code></td><td>string</td><td><code>""</code></td><td>llama.cpp</td><td>The <code>.gguf</code> file inside <code>hf_repo</code> (<code>-hff</code>; the first shard of a split GGUF) — the only place the served model is named. Older <code>model_file</code> fields and config <code>model-file</code> keys are folded into it automatically.</td></tr>
         <tr><td><code>image_tag</code></td><td>string</td><td><code>""</code></td><td>both</td><td>Per-profile Docker image override. Empty = use the default image from <code>compose/&lt;backend&gt;/</code>. See <a href="#per-profile-image_tag">below</a>.</td></tr>
       </tbody>
     </table>
@@ -145,10 +144,9 @@ profiles:                 # the list of profile entries
     port: 8080
     config_name: gemma-3-4b       # &rarr; config/llamacpp/gemma-3-4b.yaml
     gpu_id: "0"
-    model_file: gemma-3-4b-it-q4_k_m.gguf  # download + config fallback
     hf_repo: unsloth/gemma-3-4b-it-GGUF
     hf_file: gemma-3-4b-it-q4_k_m.gguf</code></pre>
-        <p>A llama.cpp profile needs GGUF metadata: <code>hf_repo</code> plus <code>hf_file</code> (or <code>model_file</code>). <code>llama-server</code> downloads the file directly into the host HF cache with <code>-hf</code> / <code>-hff</code> — no host-side <code>huggingface-cli</code> needed.</p>
+        <p>A llama.cpp profile needs <code>hf_repo</code> plus <code>hf_file</code> (or <code>hf_repo: org/name:QUANT</code>). <code>llama-server</code> downloads the file directly into the host HF cache with <code>-hf</code> / <code>-hff</code> — no host-side <code>huggingface-cli</code> needed.</p>
       </div>
     </div>
 
@@ -180,10 +178,12 @@ llmux profile new my-model --backend vllm --port 8001 --gpu-id 0 \
     --model Qwen/Qwen3-8B --config my-model
 
 # Create a llama.cpp profile
+llmux profile gguf-files unsloth/gemma-3-4b-it-GGUF   # what --hf-file accepts
 llmux profile new gemma --backend llamacpp \
-    --model-file gemma-3-4b-it-q4_k_m.gguf \
     --hf-repo unsloth/gemma-3-4b-it-GGUF \
     --hf-file gemma-3-4b-it-q4_k_m.gguf
+# …or pick the file by quant tag
+llmux profile new gemma-q8 --backend llamacpp --hf-repo unsloth/gemma-3-4b-it-GGUF:Q8_0
 
 # Edit fields (only the options you pass change)
 llmux profile edit my-model --port 8002 --gpu-id 0,1

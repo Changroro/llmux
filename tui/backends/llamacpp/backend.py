@@ -50,6 +50,12 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts" / "llamacpp"
 COMMON_ENV = PROJECT_ROOT / ".env.common"
 LLAMACPP_OFFICIAL_REPO = "ghcr.io/ggml-org/llama.cpp"
 LLAMACPP_OFFICIAL_IMAGE = f"{LLAMACPP_OFFICIAL_REPO}:server-cuda"
+# unsloth publishes mainline-llama.cpp variants as `.gguf_file`; -hff accepts any repo path.
+MODEL_FILE_SUFFIXES = (".gguf", ".gguf_file")
+
+
+def is_model_file(path: str) -> bool:
+    return path.lower().endswith(MODEL_FILE_SUFFIXES)
 
 
 def validate_name(name: str) -> bool:
@@ -58,18 +64,6 @@ def validate_name(name: str) -> bool:
 
 def _host_expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
-
-
-def _get_model_dir() -> Path:
-    env_common = ROOT / ".env.common"
-    default = ROOT / "models"
-    if not env_common.exists():
-        return default
-    env = _parse_env_file(env_common)
-    raw = env.get("MODEL_DIR")
-    if not raw:
-        return default
-    return Path(_host_expand(raw))
 
 
 def hf_cache_setting() -> str:
@@ -134,7 +128,7 @@ def list_cached_gguf() -> list[dict[str, Any]]:
                         "Hugging Face snapshot resolves outside its repository cache root"
                     )
                 seen: set[tuple[str, ...]] = set()
-                for path in sorted(snapshot.rglob("*.gguf")):
+                for path in sorted(p for p in snapshot.rglob("*") if p.is_file() and is_model_file(p.name)):
                     relative = path.relative_to(snapshot).as_posix()
                     shard_names = tuple(gguf_shard_names(relative))
                     if shard_names in seen:
@@ -177,7 +171,6 @@ class Profile:
     port: int = 8080
     gpu_id: str = "0"
     config_name: str = ""
-    model_file: str = ""
     hf_repo: str = ""
     hf_file: str = ""
     image_tag: str = ""
@@ -216,7 +209,6 @@ def _to_profile(stored: profile_store.StoredProfile) -> Profile:
         port=stored.port,
         gpu_id=stored.gpu_id,
         config_name=stored.config_name,
-        model_file=stored.model_file,
         hf_repo=stored.hf_repo,
         hf_file=stored.hf_file,
         image_tag=stored.image_tag,
@@ -232,7 +224,6 @@ def _to_stored(profile: Profile) -> profile_store.StoredProfile:
         port=int(profile.port),
         gpu_id=profile.gpu_id or "0",
         config_name=profile.config_name,
-        model_file=profile.model_file,
         hf_repo=profile.hf_repo,
         hf_file=profile.hf_file,
         image_tag=profile.image_tag,
@@ -276,37 +267,60 @@ def delete_profile(name: str, delete_config_too: bool = False) -> None:
 
 
 def list_profiles(running: set[str] | None = None) -> list[Profile]:
-    model_dir = _get_model_dir()
     running_containers: set[str] = running or set()
 
     result: list[Profile] = []
     for name in list_profile_names():
         p = load_profile(name)
-        from tui.common.prepare import resolve_gguf_file
-
-        filename = resolve_gguf_file(load_config(p.config_name or p.name).get("model-file"), p.model_file, p.hf_file)
-        if filename and p.hf_repo:
-            model_paths = [model_dir / name for name in gguf_shard_names(filename)]
-            if all(path.exists() for path in model_paths):
-                p.downloaded = True
-                p.model_size_gb = round(
-                    sum(path.stat().st_size for path in model_paths) / 1024**3, 1
-                )
-        if not p.downloaded:
-            cached = find_cached_gguf(p.hf_repo, filename)
-            if cached is not None:
-                relative_parts = Path(gguf_shard_names(filename)[0]).parts
-                snapshot = cached
-                for _ in relative_parts:
-                    snapshot = snapshot.parent
-                shard_paths = [snapshot / name for name in gguf_shard_names(filename)]
-                p.downloaded = True
-                p.model_size_gb = round(
-                    sum(path.stat().st_size for path in shard_paths) / 1024**3, 1
-                )
+        cached = find_cached_gguf(p.hf_repo, p.hf_file)
+        if cached is not None:
+            shards = gguf_shard_names(p.hf_file)
+            snapshot = cached
+            for _ in Path(shards[0]).parts:
+                snapshot = snapshot.parent
+            p.downloaded = True
+            p.model_size_gb = round(
+                sum((snapshot / shard).stat().st_size for shard in shards) / 1024**3, 1
+            )
         p.running = p.container_name in running_containers
         result.append(p)
     return result
+
+
+def migrate_gguf_sources() -> list[str]:
+    """Fold the legacy GGUF fields (profile `model_file`, config `model-file`)
+    into the profile's `hf_file`, the single source of truth. Idempotent."""
+    from tui.common.prepare import resolve_gguf_file
+
+    messages: list[str] = []
+    with profile_store.storage_transaction():
+        if not profile_store.PROFILES_YAML.exists():
+            return messages
+        # Plan every change first, then write it all at once: a half-applied
+        # migration leaves configs with a `model-file` the renderer rejects.
+        changes: dict[str, dict] = {}
+        config_writes: dict[Path, str] = {}
+        linked: set[str] = set()
+        for stored in profile_store.list_profiles("llamacpp"):
+            config_name = stored.config_name or stored.name
+            linked.add(config_name)
+            hf_file = resolve_gguf_file(
+                load_config(config_name).get("model-file"), stored.model_file, stored.hf_file
+            )
+            # A stale model_file next to the same hf_file is never read: leave the file alone.
+            if hf_file != stored.hf_file:
+                changes[stored.name] = {"hf_file": hf_file, "model_file": None}
+                messages.append(f"llama.cpp profile '{stored.name}': hf_file = {hf_file!r}")
+        for config_name in sorted(linked):
+            config = load_config(config_name)
+            if "model-file" in config.params:
+                del config.params["model-file"]
+                config_writes[config.path] = config_text(config)
+                messages.append(
+                    f"llama.cpp config '{config_name}': dropped model-file (now the profile's hf_file)"
+                )
+        profile_store.patch_profiles("llamacpp", changes, config_writes)
+    return messages
 
 
 def list_config_names() -> list[str]:
@@ -333,12 +347,14 @@ def load_config(name: str) -> Config:
 def save_config(config: Config, *, template: str | None = None) -> None:
     with profile_store.storage_transaction():
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        existing = config.path.read_text() if config.path.exists() else None
-        text = dump_active_config(existing if existing is not None else template, config.params)
-        profile_store._atomic_write(
-            config.path,
-            text + render_disabled_markers(config.disabled_params),
-        )
+        profile_store._atomic_write(config.path, config_text(config, template=template))
+
+
+def config_text(config: Config, *, template: str | None = None) -> str:
+    """The file text `save_config` writes (comments kept, disabled markers appended)."""
+    existing = config.path.read_text() if config.path.exists() else None
+    text = dump_active_config(existing if existing is not None else template, config.params)
+    return text + render_disabled_markers(config.disabled_params)
 
 
 def delete_config(name: str) -> None:
@@ -617,3 +633,113 @@ async def list_hf_repo_files(repo: str) -> list[dict]:
         raise
     except Exception as exc:
         raise HfListingUnavailable(f"{repo}: {exc}") from exc
+
+
+async def list_repo_ggufs(repo: str) -> list[str]:
+    """Every .gguf path in `repo`; raises HfListingUnavailable when HF can't be asked."""
+    return [
+        entry["path"]
+        for entry in await list_hf_repo_files(repo)
+        if entry["type"] == "file" and is_model_file(entry["path"])
+    ]
+
+
+def _is_mmproj(path: str) -> bool:
+    return "mmproj" in path.rsplit("/", 1)[-1].lower()
+
+
+def _is_entry_gguf(path: str) -> bool:
+    """A plain GGUF, or the first shard of a split one."""
+    try:
+        return gguf_shard_names(path)[0] == path
+    except ValueError:
+        return False
+
+
+def group_gguf_entries(entries: list[dict]) -> list[dict]:
+    """HF tree entries → one row per servable GGUF (split shards summed), mmproj last."""
+    sizes = {
+        e["path"]: (e.get("lfs") or {}).get("size", e.get("size", 0))
+        for e in entries
+        if e.get("type") == "file" and is_model_file(str(e.get("path", "")))
+    }
+    rows = [
+        {
+            "file": path,
+            "shards": len(shards := gguf_shard_names(path)),
+            "size_bytes": sum(sizes.get(shard, 0) for shard in shards),
+            "mmproj": _is_mmproj(path),
+        }
+        for path in sizes
+        if _is_entry_gguf(path)
+    ]
+    return sorted(rows, key=lambda row: (row["mmproj"], row["file"]))
+
+
+def split_quant_ref(ref: str) -> tuple[str, str]:
+    """`org/name:Q4_K_M` → (`org/name`, `Q4_K_M`); no tag → (ref, "")."""
+    repo, _, quant = ref.partition(":")
+    return repo, quant
+
+
+def pick_gguf_for_quant(repo: str, quant: str, ggufs: list[str]) -> str:
+    """The entry GGUF llama-server picks for `quant` (upstream find_best_model).
+
+    No quant: Q4_K_M, then Q8_0, then the first model; the first match wins.
+    A user-given quant that matches several files is refused instead.
+    """
+    models = [path for path in ggufs if _is_entry_gguf(path) and not _is_mmproj(path)]
+    for tag in [quant] if quant else ["Q4_K_M", "Q8_0"]:
+        pattern = re.compile(rf"(^|[-./]){re.escape(tag.lower())}([-.]|$)")
+        matches = [path for path in models if pattern.search(path.lower())]
+        if len(matches) > 1 and quant:
+            raise ValueError(
+                f":{quant} is ambiguous in {repo} — pass the file instead:\n  " + "\n  ".join(matches)
+            )
+        if matches:
+            return matches[0]
+    if not quant and models:
+        return models[0]
+    shown = "\n  ".join(p for p in ggufs if _is_entry_gguf(p))
+    raise ValueError(f"no GGUF in {repo} matches :{quant or 'Q4_K_M'}. Available:\n  {shown}")
+
+
+async def resolve_gguf_source(repo_ref: str, hf_file: str) -> tuple[str, str, str]:
+    """(hf_repo, hf_file, warning) for a profile; raises ValueError on bad input.
+
+    `org/name:QUANT` is resolved to the real filename when HF answers; offline it
+    is kept as-is and resolved later by prepare/up.
+    """
+    repo, quant = split_quant_ref(repo_ref.strip())
+    error = profile_store.hf_repo_error(repo)
+    if error:
+        raise ValueError(error)
+    if quant and hf_file:
+        raise ValueError("pass either org/name:QUANT or an HF file, not both")
+    if not quant and not hf_file:
+        raise ValueError("an HF file (the GGUF to serve) or org/name:QUANT is required")
+    try:
+        ggufs = await list_repo_ggufs(repo)
+    except HfListingUnavailable as exc:
+        if quant:
+            return f"{repo}:{quant}", "", (
+                f"could not list {repo} ({exc}) — :{quant} will be resolved by `llmux prepare` / `llmux up`"
+            )
+        return repo, hf_file, f"could not list {repo} ({exc}) — HF file not checked"
+    if quant:
+        return repo, pick_gguf_for_quant(repo, quant, ggufs), ""
+    error = gguf_choice_error(repo, hf_file, ggufs)
+    if error:
+        raise ValueError(error)
+    return repo, hf_file, ""
+
+
+def gguf_choice_error(repo: str, hf_file: str, ggufs: list[str]) -> str:
+    if not ggufs:
+        return f"{repo} contains no GGUF files."
+    if hf_file in ggufs:
+        return ""
+    shown = "\n  ".join(ggufs[:20])
+    more = f"\n  ... ({len(ggufs) - 20} more)" if len(ggufs) > 20 else ""
+    return f"'{hf_file}' not found in {repo}. Available GGUF files:\n  {shown}{more}"
+

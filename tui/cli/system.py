@@ -232,35 +232,18 @@ def disk(
     from tui.backends.llamacpp.backend import (
         ROOT,
         _get_hf_cache_dir,
-        _get_model_dir,
         get_disk_usage,
         list_cached_gguf,
     )
 
     try:
-        model_dir = _get_model_dir()
         hf_cache_dir = _get_hf_cache_dir()
         cached = list_cached_gguf()
         cached_total_gb = round(
             sum(c["size_bytes"] for c in cached) / 1024**3, 1
         )
-        model_dir_exists = model_dir.exists()
-        files: list[dict] = []
-        if model_dir_exists:
-            for path in model_dir.glob("*.gguf"):
-                size_bytes = path.stat().st_size
-                files.append(
-                    {
-                        "name": path.name,
-                        "size_bytes": size_bytes,
-                        "size_gb": round(size_bytes / 1024**3, 1),
-                    }
-                )
-            files.sort(key=lambda item: item["size_bytes"], reverse=True)
-
-        target = str(_nearest_existing_path(model_dir))
+        target = str(_nearest_existing_path(hf_cache_dir))
         used, avail, pct = run_async(get_disk_usage(target))
-        total_gb = round(sum(f["size_bytes"] for f in files) / 1024**3, 1)
     except Exception as exc:
         if json_out:
             emit_json({"status": "error", "backend": backend, "error": str(exc)})
@@ -273,15 +256,11 @@ def disk(
             {
                 "backend": backend,
                 "project_root": str(ROOT),
-                "model_dir": str(model_dir),
-                "model_dir_exists": model_dir_exists,
                 "hf_cache_dir": str(hf_cache_dir),
                 "df_target": target,
                 "df_used": used,
                 "df_avail": avail,
                 "df_percent": pct,
-                "gguf_files": files,
-                "gguf_total_gb": total_gb,
                 "hf_cache_gguf_files": cached,
                 "hf_cache_gguf_total_gb": cached_total_gb,
             }
@@ -289,13 +268,6 @@ def disk(
         return
 
     print(f"Project root : {ROOT}")
-    print(f"Model dir    : {model_dir}")
-    if not model_dir_exists:
-        print("(model dir does not exist yet — no GGUF files to list)")
-    else:
-        print(f"GGUF files   : {len(files)}  (total {total_gb:.1f} GB)")
-        for f in files:
-            print(f"  {f['name']}  {f['size_gb']:.1f} GB")
     print(f"HF cache dir : {hf_cache_dir}")
     print(f"HF cache GGUF: {len(cached)}  (total {cached_total_gb:.1f} GB)")
     for c in cached:
