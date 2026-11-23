@@ -1,6 +1,6 @@
 [project]
 name = "llmux"
-version = "2.8.1"
+version = "3.0.0"
 description = "A terminal multiplexer for LLM servers — one TUI to orchestrate vLLM and llama.cpp Docker profiles side by side."
 requires-python = ">=3.10"
 authors = [{ name = "chbae", email = "chbae624@gmail.com" }]
