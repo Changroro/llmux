@@ -253,31 +253,14 @@ async def test_vllm_dry_run_renders_the_env_in_memory(monkeypatch):
     assert seen == [{"write": False}]
 
 
-def test_render_override_check_mode_writes_nothing(tmp_path):
-    import os
-    import subprocess
-    from pathlib import Path
+def test_dry_run_render_validates_without_the_script():
+    # `up --dry-run` renders in-process (backend_runtime._preview_command); same validation.
+    from tui.backends.llamacpp import backend_runtime as rt
 
-    import yaml
-
-    root = tmp_path
-    (root / "compose").mkdir()
-    (root / "config" / "llamacpp").mkdir(parents=True)
-    (root / "profiles.yaml").write_text(yaml.safe_dump({
-        "version": 1,
-        "profiles": [{"name": "lp", "backend": "llamacpp", "port": 8080, "gpu_id": "0",
-                      "hf_repo": "org/X-GGUF", "hf_file": "x.gguf"}],
-    }))
-    (root / "config" / "llamacpp" / "lp.yaml").write_text("ctx-size: 4096\nn-gpu-layers: 99\n")
-    script = Path(__file__).resolve().parents[1] / "scripts" / "llamacpp" / "render-override.py"
-    env = {**os.environ, "LLMUX_ROOT": str(root)}
-    ok = subprocess.run([sys.executable, str(script), "--check", "lp"], env=env, capture_output=True, text=True, timeout=30)
-    assert ok.returncode == 0, ok.stderr
-    # Only the storage lock (taken by every reader, `ps` included) may exist.
-    assert [f.name for f in (root / ".runtime").rglob("*") if f.is_file()] in ([], [".profiles.lock"])
-    (root / "config" / "llamacpp" / "lp.yaml").write_text("extra-args: --port 1\n")
-    bad = subprocess.run([sys.executable, str(script), "--check", "lp"], env=env, capture_output=True, text=True, timeout=30)
-    assert bad.returncode == 1 and bad.stderr
+    render = rt._renderer().render_command
+    assert render({"ctx-size": 4096}, hf_repo="org/X-GGUF", hf_file="x.gguf")[-2:] == ["--ctx-size", "4096"]
+    with pytest.raises(ValueError):
+        render({"extra-args": "--port 1"}, hf_repo="org/X-GGUF", hf_file="x.gguf")
 
 
 # --dry-run must not reach onboarding (.env.common) or the update check (cache/self-update)

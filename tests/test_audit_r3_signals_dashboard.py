@@ -427,7 +427,7 @@ class DockerPortGrammarContractTests(unittest.IsolatedAsyncioTestCase):
                                 f"external\t0.0.0.0:8000->8000/{protocol}\n",
                             )
                         ),
-                    ), patch.object(runtime.socket, "socket", return_value=sock):
+                    ), patch("socket.socket", return_value=sock):
                         conflict = await runtime.check_port_conflict(profile)
 
                     self.assertIsNone(conflict)
@@ -455,7 +455,7 @@ class DockerPortGrammarContractTests(unittest.IsolatedAsyncioTestCase):
             for output in ("malformed\n", "external\t0.0.0.0:bad->8000/tcp\n"):
                 with self.subTest(runtime=runtime.__name__, output=output), patch.object(
                     runtime, run_name, AsyncMock(return_value=(0, output))
-                ), patch.object(runtime.socket, "socket") as socket_factory:
+                ), patch("socket.socket") as socket_factory:
                     with self.assertRaisesRegex(RuntimeError, "docker ps|Docker port"):
                         await runtime.check_port_conflict(profile)
 

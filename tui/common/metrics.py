@@ -28,9 +28,8 @@ _COUNTER_GAUGE_FIELDS: dict[str, tuple[str, ...]] = {
     "kv_cache_usage": (
         "vllm:kv_cache_usage_perc",
         "vllm:gpu_cache_usage_perc",
-        "llamacpp:kv_cache_usage_ratio",
     ),
-    "prefix_hits": ("vllm:prefix_cache_hits_total",),
+    "prefix_hits": ("vllm:prefix_cache_hits_total", "llamacpp:prompt_tokens_cached_total"),
     "prefix_queries": ("vllm:prefix_cache_queries_total",),
     "ext_prefix_hits": ("vllm:external_prefix_cache_hits_total",),
     "ext_prefix_queries": ("vllm:external_prefix_cache_queries_total",),
@@ -38,6 +37,14 @@ _COUNTER_GAUGE_FIELDS: dict[str, tuple[str, ...]] = {
     "requests_finished": ("vllm:request_success_total",),
     "prompt_tps_gauge": ("llamacpp:prompt_tokens_seconds",),
     "gen_tps_gauge": ("llamacpp:predicted_tokens_seconds",),
+    "draft_tokens": (
+        "vllm:spec_decode_num_draft_tokens_total",
+        "llamacpp:spec_decode_num_draft_tokens_total",
+    ),
+    "accepted_tokens": (
+        "vllm:spec_decode_num_accepted_tokens_total",
+        "llamacpp:spec_decode_num_accepted_tokens_total",
+    ),
 }
 
 # vLLM renamed `time_per_output_token`; llama.cpp exposes none of these histograms.
@@ -116,6 +123,8 @@ class MetricsSnapshot:
     requests_finished: float | None = None   # counter (request_success_total)
     prompt_tps_gauge: float | None = None    # llama.cpp reports tok/s directly
     gen_tps_gauge: float | None = None
+    draft_tokens: float | None = None        # counter, speculative decoding
+    accepted_tokens: float | None = None     # counter, speculative decoding
     ttft: Hist | None = None
     e2e: Hist | None = None
     tpot: Hist | None = None
@@ -348,6 +357,10 @@ def parse_snapshot(text: str) -> MetricsSnapshot:
             if key not in hist_invalid:
                 hists[fld] = hist_values[fld][base]
             break
+
+    if backend == "llamacpp" and "prefix_hits" in cg and "prompt_tokens" in cg:
+        # llama.cpp's prompt_tokens_total excludes the tokens served from cache.
+        cg["prefix_queries"] = cg["prefix_hits"] + cg["prompt_tokens"]
 
     return MetricsSnapshot(backend=backend, **cg, **hists)
 
