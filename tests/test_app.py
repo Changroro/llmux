@@ -1410,3 +1410,71 @@ class SystemScreenParityTests(unittest.IsolatedAsyncioTestCase):
                         app.pop_screen()
                         await pilot.pause()
 
+
+class DashboardBenchTests(unittest.IsolatedAsyncioTestCase):
+    """The dashboard bench asks for the `llmux bench` options and runs the same engine."""
+
+    async def _bench(self, backend: str, options: dict | None):
+        from tui.common import bench as bench_mod
+        from tui.common import profile_store
+        from tui.common.bench_modal import BenchOptionsModal
+        from tui.screens import dashboard as dash
+
+        profile_store.create_profile(profile_store.StoredProfile(
+            name="p", backend=backend, port=8123, hf_repo="o/r", hf_file="m.gguf",
+        ))
+        load = AsyncMock(return_value={
+            "kind": "chat", "ok": 2, "failed": 0, "req_s": 1.0, "output_tok_s": 9.0, "input_tok_s": 0.0,
+            "ttft_s": None, "tpot_s": None, "e2e_s": None, "concurrency": 2,
+        })
+        seq = AsyncMock(return_value={"median_tps": 1.0, "min_tps": 1.0, "max_tps": 1.0})
+
+        async def answer(self_app, screen, *a, **k):
+            assert isinstance(screen, BenchOptionsModal)
+            return options
+
+        with patch.object(bench_mod, "run_load", load), \
+                patch.object(dash, "run_bench", seq), \
+                patch.object(dash, "list_served_models", AsyncMock(return_value=["m"])), \
+                patch.object(bench_mod, "profile_kind", return_value="chat"), \
+                patch("tui.common.http.profile_api_key", AsyncMock(return_value="")), \
+                patch("tui.common.http.config_api_key", AsyncMock(return_value="")), \
+                patch.object(type(LlmuxApp()), "push_screen_wait", answer):
+            app = LlmuxApp()
+            async with app.run_test(size=WIDE) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                if backend == "vllm":
+                    from tui.common.adapter import DashboardRow
+
+                    worker = screen._run_vllm_bench(DashboardRow(
+                        backend="vllm", profile_name="p", container_name="p", port=8123,
+                        running=True, model="m", detail="", gpu_id="0", raw=None,
+                    ))
+                else:
+                    from tui.backends.llamacpp import backend as lbackend
+
+                    worker = screen._run_llamacpp_bench(lbackend.load_profile("p"))
+                await worker.wait()
+        return load, seq
+
+    async def test_load_options_run_the_load_bench_on_both_backends(self) -> None:
+        for backend in ("vllm", "llamacpp"):
+            with self.subTest(backend=backend):
+                from tui.common import profile_store
+
+                profile_store.PROFILES_YAML.unlink(missing_ok=True)
+                load, seq = await self._bench(backend, {"kind": "auto", "concurrency": 2, "requests": 4})
+                self.assertEqual(load.await_args.kwargs["concurrency"], 2)
+                self.assertEqual(load.await_args.kwargs["requests"], 4)
+                seq.assert_not_awaited()
+
+    async def test_blank_options_keep_the_sequential_bench(self) -> None:
+        load, seq = await self._bench("llamacpp", {"kind": "auto", "concurrency": None, "requests": None})
+        seq.assert_awaited_once()
+        load.assert_not_awaited()
+
+    async def test_cancel_runs_nothing(self) -> None:
+        load, seq = await self._bench("llamacpp", None)
+        seq.assert_not_awaited()
+        load.assert_not_awaited()

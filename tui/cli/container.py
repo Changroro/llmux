@@ -21,7 +21,7 @@ from tui.cli._runtime import (
 )
 from tui.common import docker as common_docker
 from tui.common import profile_store
-from tui.common.exit_codes import CONFLICT, ERROR, INTERRUPTED, UNREACHABLE, USAGE
+from tui.common.exit_codes import CONFLICT, ERROR, INTERRUPTED, OK, UNREACHABLE, USAGE
 from tui.common.readiness import profile_port
 from tui.common.dev_build import repo_url_error
 from tui.common.http import (
@@ -378,8 +378,34 @@ def benchmark(
     json_out: bool = typer.Option(
         False, "--json", help="Emit a JSON record instead of a human line."
     ),
+    concurrency: Optional[int] = typer.Option(
+        None, "--concurrency", "-c",
+        help="Load mode: requests in flight at once. Reports throughput and "
+             "TTFT / per-token / end-to-end latency percentiles.",
+    ),
+    requests: Optional[int] = typer.Option(
+        None, "--requests", help="Load mode: total measured requests (default: --runs)."
+    ),
+    kind: str = typer.Option(
+        "auto", "--kind",
+        help="auto (read the profile's config), chat, embedding or rerank. "
+             "Embedding/rerank servers are always benched in load mode.",
+    ),
 ) -> None:
-    """Benchmark a running container (tok/s). Mirrors the TUI dashboard bench."""
+    """Benchmark a running container. Mirrors the TUI dashboard bench.
+
+    Plain chat runs report the median tok/s of sequential requests; any of
+    --concurrency/--requests, or an embedding/rerank server, switches to load
+    mode (streamed requests, latency percentiles).
+    """
+    from tui.common.bench import KINDS, profile_kind, run_load, uses_load_mode
+
+    if kind != "auto" and kind not in KINDS:
+        raise typer.BadParameter(f"choose auto or one of {', '.join(KINDS)}", param_hint="--kind")
+    if concurrency is not None and concurrency < 1:
+        raise typer.BadParameter("must be at least 1", param_hint="--concurrency")
+    if requests is not None and requests < 1:
+        raise typer.BadParameter("must be at least 1", param_hint="--requests")
     if max_tokens < 1:
         raise typer.BadParameter("must be at least 1", param_hint="--max-tokens")
     if runs < 1:
@@ -388,9 +414,9 @@ def benchmark(
         raise typer.BadParameter("must be at least 0", param_hint="--warmup")
     bk = detect_backend(profile, override=backend)
     sp = profile_store.load_profile(profile, bk)
+    record = {"profile": profile, "backend": bk}
     if not sp.port:
-        typer.echo(f"profile '{profile}' has no port set", err=True)
-        raise typer.Exit(code=2)
+        fail(f"Error: profile '{profile}' has no port set", code=USAGE, json_out=json_out, record=record)
 
     async def _run() -> dict:
         from tui.common.http import list_served_models, profile_api_key, run_bench
@@ -427,14 +453,42 @@ def benchmark(
             **r,
         }
 
+    async def _load() -> dict | None:
+        bench_kind = kind if kind != "auto" else profile_kind(bk, sp.config_name or sp.name)
+        if not uses_load_mode(bench_kind, concurrency, requests):
+            return None
+        from tui.common.http import list_served_models, profile_api_key
+
+        api_key = await profile_api_key(bk, profile)
+        served = await list_served_models(sp.port, **({"api_key": api_key} if api_key else {}))
+        if not served:
+            raise RuntimeError("could not identify a served model (/v1/models returned nothing)")
+        r = await run_load(
+            sp.port, served[0], kind=bench_kind,
+            concurrency=concurrency or 1, requests=requests or runs, warmup=warmup,
+            prompt=prompt, max_tokens=max_tokens, api_key=api_key,
+        )
+        return {"profile": profile, "backend": bk, "port": sp.port, "warmup": warmup, **r}
+
+    try:
+        load = run_async(_load())
+    except Exception as exc:
+        fail(f"Error: benchmark failed: {exc}", code=ERROR, json_out=json_out, record=record)
+    if load is not None:
+        code = OK if load["succeeded"] and not load["failed"] else ERROR
+        if json_out:
+            emit_json({**load, "ok": code == OK, "code": code})
+        else:
+            _print_load(load)
+        raise typer.Exit(code=code)
+
     try:
         result = run_async(_run())
     except Exception as exc:
-        typer.echo(f"benchmark failed: {exc}", err=True)
-        raise typer.Exit(code=1)
+        fail(f"Error: benchmark failed: {exc}", code=ERROR, json_out=json_out, record=record)
 
     if json_out:
-        emit_json(result)
+        emit_json({**result, "ok": True, "code": OK})
         return
     head = f"{result['profile']} ({result['backend']}, port {result['port']})"
     print(f"{head}  [{result['model']}]  warmup={result['warmup']}")
@@ -448,6 +502,24 @@ def benchmark(
         f"({result['min_tps']:.1f}–{result['max_tps']:.1f})"
     )
 
+
+
+def _print_load(r: dict) -> None:
+    print(
+        f"{r['profile']} ({r['backend']}, port {r['port']})  [{r['model']}]  {r['kind']}  "
+        f"concurrency={r['concurrency']} requests={r['requests']} warmup={r['warmup']}"
+    )
+    print(f"  ok {r['succeeded']}  failed {r['failed']}  in {r['duration_s']:.2f}s  = {r['req_s']:.2f} req/s")
+    if r["kind"] == "chat":
+        print(f"  output {r['output_tokens']} tok = {r['output_tok_s']:.1f} tok/s")
+    else:
+        print(f"  input {r['input_tokens']} tok = {r['input_tok_s']:.1f} tok/s")
+    for label, key in (("TTFT", "ttft_s"), ("per-token", "tpot_s"), ("end-to-end", "e2e_s")):
+        p = r[key]
+        if p:
+            print(f"  {label:<10} p50 {p['p50'] * 1000:.0f} ms  p90 {p['p90'] * 1000:.0f} ms  p99 {p['p99'] * 1000:.0f} ms")
+    for error in r["errors"]:
+        typer.echo(f"Error: {error}", err=True)
 
 
 @app.command("stats")

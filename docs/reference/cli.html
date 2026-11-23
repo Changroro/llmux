@@ -353,7 +353,8 @@ uv run llmux render-env qwen3-0-6b
 uv run llmux container render-env --backend llamacpp</code></pre>
 
     <h3 id="container-benchmark"><code>container benchmark</code> · <code>bench</code></h3>
-    <p>Benchmark a running container's generation speed via <code>/v1/chat/completions</code>. A warmup call is discarded, then <code>--runs</code> measured calls report the <strong>median</strong> tok/s (a single cold call conflates model warmup with steady-state decode).</p>
+    <p>Benchmark a running container. By default it measures generation speed via <code>/v1/chat/completions</code>: a warmup call is discarded, then <code>--runs</code> measured calls report the <strong>median</strong> tok/s (a single cold call conflates model warmup with steady-state decode).</p>
+    <p><strong>Load mode</strong> starts when you pass <code>--concurrency</code> or <code>--requests</code>, or when the profile serves embeddings or reranking (read from its config: llama.cpp <code>embedding</code> / <code>reranking</code> / <code>pooling: rank</code>, vLLM <code>task</code> / <code>convert</code> / <code>runner: pooling</code>). It sends streamed requests with at most <em>N</em> in flight and reports requests/s, token throughput, and p50/p90/p99 of TTFT, per-token latency and end-to-end latency; embedding and rerank servers are benched on <code>/v1/embeddings</code> and <code>/v1/rerank</code>. Failed requests are counted, and any failure makes the run fail: the JSON record (stats included) has <code>"ok": false</code> and the command exits 1. The TUI bench asks for the same options.</p>
     <pre data-lang="text"><code>llmux bench PROFILE [OPTIONS]</code></pre>
     <table>
       <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
@@ -363,11 +364,16 @@ uv run llmux container render-env --backend llamacpp</code></pre>
         <tr><td><code>--max-tokens</code></td><td><code>200</code></td><td><code>max_tokens</code> for the request.</td></tr>
         <tr><td><code>--runs</code></td><td><code>3</code></td><td>Measured runs; the reported figure is their median.</td></tr>
         <tr><td><code>--warmup</code></td><td><code>1</code></td><td>Warmup runs discarded before measuring.</td></tr>
-        <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit a JSON record (per-run + median/min/max) instead of a human line.</td></tr>
+        <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit a JSON record (per-run + median/min/max, or the load report) instead of a human line.</td></tr>
+        <tr><td><code>--concurrency</code>, <code>-c</code></td><td><em>(off)</em></td><td>Load mode: requests in flight at once.</td></tr>
+        <tr><td><code>--requests</code></td><td><code>--runs</code></td><td>Load mode: total measured requests.</td></tr>
+        <tr><td><code>--kind</code></td><td><code>auto</code></td><td><code>auto</code> (from the profile's config), <code>chat</code>, <code>embedding</code> or <code>rerank</code>.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code>uv run llmux bench qwen3-0-6b --runs 5
-uv run llmux bench qwen3-0-6b --json</code></pre>
+uv run llmux bench qwen3-0-6b --json
+uv run llmux bench qwen3-0-6b --concurrency 8 --requests 64   # throughput + latency percentiles
+uv run llmux bench qwen3-embedding                             # embedding server → /v1/embeddings</code></pre>
 
     <h3 id="container-stats"><code>container stats</code> · <code>stats</code></h3>
     <p>Live token throughput (tok/s) for every running container, polled from its Prometheus <code>/metrics</code> endpoint. Rates are deltas between successive samples, so the first line appears one interval in. An unavailable metric reads <code>n/a</code>; an HTTP request failure is reported as an error rather than displayed as normal missing data.</p>
