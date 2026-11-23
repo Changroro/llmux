@@ -274,10 +274,11 @@ def _compose_base_args(profile: Profile) -> list[str]:
     return args
 
 
-async def _render_override(profile_name: str) -> tuple[int, str]:
+async def _render_override(profile_name: str, *, check: bool = False) -> tuple[int, str]:
     return await _run(
         sys.executable,
         str(SCRIPTS_DIR / "render-override.py"),
+        *(["--check"] if check else []),
         profile_name,
     )
 
@@ -464,7 +465,7 @@ async def _post_start_validation(
             elif tail.strip():
                 msgs.append("Recent logs:")
                 msgs.extend([f"  {line}" for line in tail.strip().splitlines()[-12:]])
-            yield ("result", False, msgs)
+            yield ("result", False, msgs, "crashed")
             return
 
         if status != "running":
@@ -543,6 +544,7 @@ async def _post_start_validation(
                     f"after {int(max_wait)}s.",
                     "  Model may be stuck — check `docker logs` and retry once ready.",
                 ],
+                "stalled",
             )
             return
 
@@ -554,6 +556,7 @@ async def _post_start_validation(
                     "Error: container started but /v1/models is not ready within timeout.",
                     "  Model is likely still loading — watch logs and retry once ready.",
                 ],
+                "stalled",
             )
             return
 
@@ -561,8 +564,9 @@ async def _post_start_validation(
 
 
 def _ensure_profile_config(
-    stored: profile_store.StoredProfile, profile: Profile
+    stored: profile_store.StoredProfile, profile: Profile, *, dry_run: bool = False
 ) -> tuple[bool, list[str]]:
+    """Link/create/check the profile's config. `dry_run` checks but never writes."""
     with profile_store.storage_transaction():
         latest_stored = profile_store.load_profile(stored.name, "llamacpp")
         if latest_stored is None:
@@ -574,12 +578,18 @@ def _ensure_profile_config(
         if not latest_stored.config_name:
             latest_stored.config_name = latest_profile.name
             latest_profile.config_name = latest_profile.name
-            try:
-                profile_store.save_profile(latest_stored)
-            except Exception as exc:  # noqa: BLE001
-                messages.append(f"✗ config 자동 링크 저장 실패: {exc}")
-                return False, messages
-            messages.append(f"▸ config 미링크 — '{latest_profile.name}' 로 자동 링크")
+            if dry_run:
+                messages.append(f"Dry run: would auto-link config '{latest_profile.name}'")
+            else:
+                try:
+                    profile_store.save_profile(latest_stored)
+                except Exception as exc:  # noqa: BLE001
+                    messages.append(f"✗ config 자동 링크 저장 실패: {exc}")
+                    return False, messages
+                messages.append(f"▸ config 미링크 — '{latest_profile.name}' 로 자동 링크")
+        if dry_run and not (CONFIG_DIR / f"{latest_stored.config_name}.yaml").exists():
+            messages.append(f"Dry run: would create default config '{latest_stored.config_name}'")
+            return True, messages
 
         config_path = CONFIG_DIR / f"{latest_stored.config_name}.yaml"
         if not config_path.exists():
@@ -618,7 +628,7 @@ def _ensure_profile_config(
         return True, messages
 
 
-def _render_profile_snapshot(profile_name: str) -> tuple[Profile, Path]:
+def _render_profile_snapshot(profile_name: str, *, write: bool = True) -> tuple[Profile, Path]:
     with profile_store.storage_transaction():
         stored = profile_store.load_profile(profile_name, "llamacpp")
         if stored is None:
@@ -626,7 +636,7 @@ def _render_profile_snapshot(profile_name: str) -> tuple[Profile, Path]:
                 f"profile {profile_name!r} not found in backend 'llamacpp'"
             )
         profile = load_profile(profile_name)
-        path = profile_store.render_env(stored)
+        path = profile_store.render_env(stored) if write else profile_store.check_env(stored)
         return profile, path
 
 
@@ -639,6 +649,11 @@ async def stream_container_up(
     pull: bool = False,
     repo_url: str = "",
     branch: str = "",
+    stall_timeout: float = 45.0,
+    ready_timeout: float = 1800.0,
+    dry_run: bool = False,
+    stage_image: bool = False,
+    image_staged: bool = False,
 ):
     stored = profile_store.load_profile(profile_name, "llamacpp")
     if stored is None:
@@ -678,16 +693,18 @@ async def stream_container_up(
         yield ("rc", 1)
         return
 
-    try:
-        conflict = await check_port_conflict(profile)
-    except RuntimeError as exc:
-        yield ("log", f"✗ 포트 사전 확인 실패: {exc}")
-        yield ("rc", 1)
-        return
-    if conflict:
-        yield ("log", f"✗ 포트 {profile.port} 사용 중 — {conflict}")
-        yield ("rc", 1)
-        return
+    # Dry run leaves port ownership to the CLI pre-flight (see the vLLM runtime).
+    if not dry_run:
+        try:
+            conflict = await check_port_conflict(profile)
+        except RuntimeError as exc:
+            yield ("log", f"✗ 포트 사전 확인 실패: {exc}")
+            yield ("rc", 1)
+            return
+        if conflict:
+            yield ("log", f"✗ 포트 {profile.port} 사용 중 — {conflict}")
+            yield ("rc", 1)
+            return
     try:
         gpu_messages = await _gpu_conflict_messages(profile)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -699,7 +716,10 @@ async def stream_container_up(
 
     # Config linking must precede transient image_tag assignment.
     try:
-        ok, cfg_messages = _ensure_profile_config(stored, profile)
+        ok, cfg_messages = (
+            _ensure_profile_config(stored, profile, dry_run=True) if dry_run
+            else _ensure_profile_config(stored, profile)
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"✗ config 저장 실패: {exc}")
         yield ("rc", 1)
@@ -711,7 +731,10 @@ async def stream_container_up(
         return
 
     try:
-        profile, _ = _render_profile_snapshot(profile_name)
+        profile, _ = (
+            _render_profile_snapshot(profile_name, write=False) if dry_run
+            else _render_profile_snapshot(profile_name)
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"✗ profile env render 실패: {exc}")
         yield ("rc", 1)
@@ -753,7 +776,9 @@ async def stream_container_up(
             yield ("log", f"▸ Dev image {resolved_image_tag} not found — building from {resolved_repo}@{resolved_branch}")
         elif not matches:
             yield ("log", f"▸ Dev image {resolved_image_tag} exists but was built from a different repo/branch — rebuilding from {resolved_repo}@{resolved_branch}")
-        if not matches:
+        if not matches and dry_run and not stage_image:
+            yield ("log", "Dry run: dev image would be built first.")
+        elif not matches:
             async with aclosing(_stream_build_dev_image(resolved_branch, repo_url=resolved_repo, custom_tag=tag)) as _owned_stream:
                 async for event in _owned_stream:
                     if event[0] == "rc":
@@ -797,7 +822,13 @@ async def stream_container_up(
         yield ("log", f"▸ Image: {resolved_image_tag}")
 
     yield ("log", "▸ command 렌더링")
-    rc, out = await _render_override(profile_name)
+    if dry_run and not (CONFIG_DIR / f"{profile.config_name or profile_name}.yaml").exists():
+        # The real `up` creates the default config first; nothing to render against yet.
+        rc, out = 0, ""
+    elif dry_run:
+        rc, out = await _render_override(profile_name, check=True)
+    else:
+        rc, out = await _render_override(profile_name)
     if rc != 0:
         yield ("log", out.strip() or "✗ override 렌더 실패")
         yield ("rc", rc)
@@ -819,7 +850,22 @@ async def stream_container_up(
         else "always" if pull
         else "missing"
     )
+    if image_staged:  # --replace already secured this image before stopping anything
+        pull_policy = "never"
     cmd = [*_compose_base_args(profile), "up", "-d", "--pull", pull_policy]
+    if dry_run:
+        if stage_image:
+            async with aclosing(prepare.secure_image(resolved_image_tag, pull_policy, stage=True)) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "rc":
+                        if int(event[1]) != 0:
+                            yield event
+                            return
+                    else:
+                        yield event
+        yield ("plan", {"command": cmd, "image": resolved_image_tag})
+        yield ("rc", 0)
+        return
 
     async with aclosing(_stream(cmd, env=env)) as _owned_stream:
         async for event in _owned_stream:
@@ -833,7 +879,7 @@ async def stream_container_up(
 
             ok = False
             val_messages: list[str] = []
-            async with aclosing(_post_start_validation(profile, hf_cache_path=env.get('HF_CACHE_PATH') or None)) as _owned_stream:
+            async with aclosing(_post_start_validation(profile, timeout=stall_timeout, max_wait=ready_timeout, hf_cache_path=env.get('HF_CACHE_PATH') or None)) as _owned_stream:
                 async for ev in _owned_stream:
                     if ev[0] == "result":
                         ok, val_messages = ev[1], ev[2]

@@ -178,7 +178,7 @@ def mem_estimate(
 @app.command("disk")
 def disk(
     backend: str = typer.Option(
-        "llamacpp", "--backend", "-b", help="Storage backend (vllm or llamacpp)."
+        "vllm", "--backend", "-b", help="Storage backend (vllm or llamacpp)."
     ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit JSON instead of a human-readable summary."

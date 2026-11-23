@@ -12,7 +12,7 @@ mirrors every TUI capability and is the only interface usable headlessly.
 
 Start from `llmux --help`. Top-level shortcuts and sub-apps:
 
-- Container lifecycle: `llmux up <profile>`, `prepare`, `down`, `logs`, `ps`, `bench`, `render-env`
+- Container lifecycle: `llmux up <profile>`, `prepare`, `down`, `wait`, `logs`, `ps`, `bench`, `render-env`
   (`prepare` = everything `up` does except starting the server: renders the
   runtime files, ensures the image is local, downloads the weights.)
 - Profiles: `llmux profile {list,show,new,edit,rename,clone,delete,quick-setup}`
@@ -32,6 +32,27 @@ or huggingface.co exits non-zero instead of returning an empty result — `ps`
 never shows `stopped` because the probe failed; `--log-level DEBUG` surfaces the
 exception. Keep it that way: `run_command` returns `(1, "")` for a missing binary
 *and* a failed call, so emptiness never proves absence (cf. `gpu_probe_failed`).
+
+| Code | Meaning (`tui/common/exit_codes.py`) |
+|---|---|
+| 0 | success (`down` on a stopped profile included) |
+| 1 | operation failed; `up` stops a container that crashed during startup |
+| 2 | usage error (unknown profile, bad option) |
+| 3 | conflict — port or GPUs taken |
+| 4 | not ready — server still running but not answering `/v1/models`; follow with `llmux wait` |
+| 5 | unreachable — docker / registry / network could not be queried |
+| 130 | interrupted |
+
+**Agent contract.** With `--json`, stdout holds exactly one record —
+`{"ok": true, "code": 0, …}` or `{"ok": false, "code": N, "error": …}` (the
+failure record is guaranteed by `tui.cli.main`, usage errors included). All
+human output and every `Error`/`✗`/`Warning`/`⚠` line go to stderr; runtime
+streams must keep those prefixes on diagnostic lines. Write commands get the
+record via `@json_command` in `tui/cli/_runtime.py`. `up --dry-run` validates
+in memory and returns the compose command as `plan`; it writes no file and
+never builds, pulls, stops or starts anything. `--replace` runs that dry run
+(plus a host-socket port check and the image pull/build) before stopping anything;
+the start then reuses that image (`--pull never`).
 
 ## Repo layout (high-level)
 

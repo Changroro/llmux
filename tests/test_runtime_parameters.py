@@ -148,7 +148,8 @@ async def test_authenticated_calls_do_not_follow_cross_origin_redirects():
     try:
         with pytest.raises(RuntimeError, match="302"):
             await http.list_served_models(source.server_port, api_key="secret")
-        assert not await vllm._models_endpoint_ready(source.server_port, api_key="secret")
+        with pytest.raises(vllm._ServerMisconfigured, match="302"):
+            await vllm._models_endpoint_ready(source.server_port, api_key="secret")
         assert not await llama._models_endpoint_ready(source.server_port, api_key="secret")
         with pytest.raises(Exception, match="302"):
             await http.chat_completion_bench(source.server_port, "model", api_key="secret")

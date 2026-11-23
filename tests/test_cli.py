@@ -1595,3 +1595,65 @@ class CliSmokeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentJsonContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = _make_temp_project()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_write_commands_emit_one_json_record(self) -> None:
+        r = _run_cli(self.tmp, "profile", "new", "charlie", "--port", "8003", "--model", "org/m", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        record = json.loads(r.stdout)
+        self.assertEqual(record["ok"], True)
+        self.assertEqual(record["profile"]["name"], "charlie")
+        self.assertEqual(record["profile"]["port"], 8003)
+        self.assertIn("Created profile", r.stderr)
+
+        r = _run_cli(self.tmp, "config", "new", "charlie", "--model", "org/m", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["config"], "charlie")
+
+    def test_failed_json_command_still_emits_error_record(self) -> None:
+        r = _run_cli(self.tmp, "profile", "delete", "nope", "--yes", "--json")
+        self.assertEqual(r.returncode, 2)
+        record = json.loads(r.stdout)
+        self.assertEqual(record["ok"], False)
+        self.assertEqual(record["code"], 2)
+        self.assertIn("nope", record["error"])
+
+    def test_profile_json_port_is_always_int(self) -> None:
+        r = _run_cli(self.tmp, "profile", "list", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = {row["name"]: row for row in json.loads(r.stdout)}
+        self.assertEqual(rows["lcpp"]["port"], 8080)
+        self.assertIsInstance(rows["bravo"]["port"], int)
+        self.assertEqual(rows["alpha"]["model"], "Qwen/Qwen3-0.6B")
+
+    def test_build_dev_b_selects_backend(self) -> None:
+        r = _run_cli(self.tmp, "image", "build-dev", "-b", "nope")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("unknown --backend 'nope'", r.stderr)
+
+
+class DeclinedConfirmationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = _make_temp_project()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_declined_delete_still_emits_a_json_record(self) -> None:
+        env = {**os.environ, "LLMUX_ROOT": str(self.tmp), "NO_COLOR": "1"}
+        r = subprocess.run(
+            [sys.executable, "-m", "tui", "config", "delete", "alpha", "--json"],
+            cwd=REPO_ROOT, env=env, input="n\n", capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        record = json.loads(r.stdout)
+        self.assertEqual(record["action"], "declined")
+        self.assertIn("Declined", r.stderr)
+        self.assertTrue((self.tmp / "config" / "vllm" / "alpha.yaml").exists())

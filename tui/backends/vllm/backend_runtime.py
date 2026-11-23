@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import aclosing
 
 import asyncio
-import errno
 import json
 import os
 import re
@@ -42,9 +41,11 @@ from .backend_storage import (
     save_profile,
 )
 from tui.common import dev_build, prepare, profile_store
+from tui.common.exit_codes import CONFLICT, ERROR, NOT_READY, UNREACHABLE
 from tui.common import docker as common_docker
 from tui.common.conflicts import (
     gpu_conflict_messages as _shared_gpu_conflict_messages,
+    local_port_in_use,
     published_tcp_host_ports,
 )
 from tui.common.env import validate_common_env
@@ -133,15 +134,19 @@ def _validate_core_config_file(path: os.PathLike[str] | str) -> None:
     _validate_core_config_data(data)
 
 
-def _ensure_profile_config(profile: Profile) -> tuple[bool, list[str]]:
+def _ensure_profile_config(profile: Profile, *, dry_run: bool = False) -> tuple[bool, list[str]]:
+    """Link/create/fix the profile's config. `dry_run` only reports what it would write."""
     with profile_store.storage_transaction():
         latest = load_profile(profile.name)
         messages: list[str] = []
         if not latest.config_name:
             latest.config_name = latest.name
-            save_profile(latest)
+            if not dry_run:
+                save_profile(latest)
             messages.append(
-                f"No config linked for '{latest.name}'. Auto-linked default config '{latest.config_name}'."
+                f"No config linked for '{latest.name}'. "
+                + ("Dry run: would auto-link" if dry_run else "Auto-linked")
+                + f" default config '{latest.config_name}'."
             )
         config = load_config(latest.config_name)
         if config.path.exists():
@@ -150,10 +155,12 @@ def _ensure_profile_config(profile: Profile) -> tuple[bool, list[str]]:
             if model != "your-org/your-model":
                 return True, messages
             if latest.model_id:
-                config.model = latest.model_id
-                save_config(config)
+                if not dry_run:
+                    config.model = latest.model_id
+                    save_config(config)
                 messages.append(
-                    f"Updated config/{latest.config_name}.yaml: model placeholder replaced "
+                    ("Dry run: would update" if dry_run else "Updated")
+                    + f" config/{latest.config_name}.yaml: model placeholder replaced "
                     f"with profile MODEL_ID '{latest.model_id}'."
                 )
                 return True, messages
@@ -168,18 +175,29 @@ def _ensure_profile_config(profile: Profile) -> tuple[bool, list[str]]:
             )
             return False, messages
 
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         if latest.model_id:
-            save_config(
-                Config(
-                    name=latest.config_name,
-                    model=latest.model_id,
-                    gpu_memory_utilization=0.9,
+            if not dry_run:
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                save_config(
+                    Config(
+                        name=latest.config_name,
+                        model=latest.model_id,
+                        gpu_memory_utilization=0.9,
+                    )
                 )
+            messages.append(
+                ("Dry run: would create" if dry_run else "Created")
+                + f" default config: config/{latest.config_name}.yaml"
             )
-            messages.append(f"Created default config: config/{latest.config_name}.yaml")
             return True, messages
 
+        if dry_run:
+            messages.append(
+                f"Error: config/{latest.config_name}.yaml does not exist and MODEL_ID is not set "
+                f"for profile '{latest.name}'."
+            )
+            return False, messages
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         profile_store._atomic_write(
             config.path,
             f"# Auto-generated default config for profile: {latest.name}\n"
@@ -199,13 +217,13 @@ def _ensure_profile_config(profile: Profile) -> tuple[bool, list[str]]:
         return False, messages
 
 
-def _render_profile_snapshot(profile_name: str) -> tuple[Profile, os.PathLike[str]]:
+def _render_profile_snapshot(profile_name: str, *, write: bool = True) -> tuple[Profile, os.PathLike[str]]:
     with profile_store.storage_transaction():
         stored = profile_store.load_profile(profile_name, "vllm")
         if stored is None:
             raise ValueError(f"profile {profile_name!r} not found in backend 'vllm'")
         profile = load_profile(profile_name)
-        path = profile_store.render_env(stored)
+        path = profile_store.render_env(stored) if write else profile_store.check_env(stored)
         return profile, path
 
 
@@ -251,11 +269,12 @@ def _compose_env(
     return env
 
 
-def _env_file_args(profile: Profile) -> list[str]:
+def _env_file_args(profile: Profile, *, rendered: bool = False) -> list[str]:
+    """`rendered`: `up` writes the profile .env before compose runs, so a dry-run plan names it too."""
     args: list[str] = []
     if COMMON_ENV.exists():
         args.extend(["--env-file", str(COMMON_ENV)])
-    if profile.path.exists():
+    if rendered or profile.path.exists():
         args.extend(["--env-file", str(profile.path)])
     return args
 
@@ -487,26 +506,22 @@ async def check_port_conflict(profile: Profile) -> str | None:
                     return f"profile '{name}'"
             return f"container '{container_name}'"
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # SO_REUSEADDR: our own readiness probe leaves a TIME_WAIT entry on this
-    # port for ~60s, and a plain bind() refuses those. A port a process is
-    # actively LISTENING on still fails — that is the conflict we look for.
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.bind(("127.0.0.1", int(profile.port)))
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            return f"another local process on 127.0.0.1:{profile.port}"
-        raise RuntimeError(
-            f"local port bind probe failed for 127.0.0.1:{profile.port}: {exc}"
-        ) from exc
-    finally:
-        sock.close()
+    if local_port_in_use(int(profile.port), "127.0.0.1"):
+        return f"another local process on 127.0.0.1:{profile.port}"
     return None
 
 
+class _ServerMisconfigured(RuntimeError):
+    """/v1/models answered with an error that waiting will not fix (e.g. HTTP 401)."""
+
+
 async def _models_endpoint_ready(port: str, timeout: int = 3, *, api_key: str = "") -> bool:
-    """Return True when /v1/models responds with at least one served model id."""
+    """Return True when /v1/models responds with at least one served model id.
+
+    Raises _ServerMisconfigured when the answer is an error, not a server still loading.
+    """
+    from tui.common.readiness import _classify
+
     loop = asyncio.get_running_loop()
 
     def _probe() -> bool:
@@ -519,7 +534,9 @@ async def _models_endpoint_ready(port: str, timeout: int = 3, *, api_key: str = 
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
             data = payload.get("data", [])
             return any(isinstance(item, dict) and item.get("id") for item in data)
-        except Exception:
+        except Exception as exc:
+            if _classify(exc) == "error":
+                raise _ServerMisconfigured(f"{type(exc).__name__}: {exc}") from exc
             return False
 
     return await loop.run_in_executor(None, _probe)
@@ -568,7 +585,7 @@ async def _post_start_validation(
             "inspect",
             profile.container_name,
             "--format",
-            "{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+            "{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\t{{.Id}}",
             timeout=10,
         )
         if rc != 0:
@@ -580,16 +597,17 @@ async def _post_start_validation(
                     f"Error: could not inspect container '{profile.container_name}' after startup.",
                     f"  {message}",
                 ],
+                "unreachable",
             )
             return
-        status = "unknown"
-        health = "unknown"
-        if state.strip():
-            parts = state.strip().split("\t", 1)
-            status = parts[0].strip()
-            health = parts[1].strip() if len(parts) == 2 else "unknown"
+        parts = [part.strip() for part in state.strip().split("\t")]
+        status = parts[0] or "unknown"
+        health = parts[1] if len(parts) > 1 else "unknown"
+        container_id = parts[2] if len(parts) > 2 else ""
 
-        if status in {"restarting", "exited", "dead"} or health == "unhealthy":
+        # running+unhealthy is a slow first load past the healthcheck start_period,
+        # not a crash: it stays on the stall path.
+        if status in {"restarting", "exited", "dead"}:
             logs_rc, tail = await run_command(
                 "docker",
                 "logs",
@@ -598,12 +616,7 @@ async def _post_start_validation(
                 profile.container_name,
                 timeout=10,
             )
-            reason = (
-                f"container '{profile.container_name}' exited during startup ({status})"
-                if status in {"restarting", "exited", "dead"}
-                else f"container '{profile.container_name}' became unhealthy during startup"
-            )
-            messages = [f"Error: {reason}."]
+            messages = [f"Error: container '{profile.container_name}' exited during startup ({status})."]
             if logs_rc != 0:
                 messages.append(
                     f"Recent logs unavailable: {tail.strip() or f'docker logs exited with status {logs_rc}'}"
@@ -611,7 +624,7 @@ async def _post_start_validation(
             elif tail.strip():
                 messages.append("Recent logs:")
                 messages.extend([f"  {line}" for line in tail.strip().splitlines()[-12:]])
-            yield ("result", False, messages)
+            yield ("result", False, messages, "crashed", container_id)
             return
 
         if status not in {"running"}:
@@ -624,7 +637,20 @@ async def _post_start_validation(
             )
             return
 
-        if await _models_endpoint_ready(profile.port, **({"api_key": api_key} if api_key else {})):
+        try:
+            ready = await _models_endpoint_ready(profile.port, **({"api_key": api_key} if api_key else {}))
+        except _ServerMisconfigured as exc:
+            yield (
+                "result",
+                False,
+                [
+                    f"Error: /v1/models answered but the server is misconfigured — {exc}",
+                    "  Check the config's api-key; the container is left running.",
+                ],
+                "error",
+            )
+            return
+        if ready:
             yield ("result", True, [])
             return
 
@@ -660,6 +686,7 @@ async def _post_start_validation(
                 "result",
                 False,
                 [f"Error: startup progress probe failed: {detail}"],
+                "unreachable",
             )
             return
         if last_log_tail is not None and log_tail != last_log_tail:
@@ -690,6 +717,7 @@ async def _post_start_validation(
                     f"after {int(max_wait)}s.",
                     "  Model may be stuck — check `docker logs` and retry once ready.",
                 ],
+                "stalled",
             )
             return
 
@@ -701,6 +729,7 @@ async def _post_start_validation(
                     "Error: container started but /v1/models is not ready within timeout.",
                     "  Model is likely still loading — watch logs and retry once ready.",
                 ],
+                "stalled",
             )
             return
 
@@ -715,8 +744,21 @@ async def stream_container_up(
     pull: bool = False,
     repo_url: str = "",
     branch: str = "",
+    *,
+    stall_timeout: float = 45.0,
+    ready_timeout: float = 1800.0,
+    dry_run: bool = False,
+    stage_image: bool = False,
+    image_staged: bool = False,
 ):
     """Async generator that streams container startup output line by line.
+
+    `dry_run` validates (in memory) and resolves the image, then yields one
+    ("plan", {...}) event. It writes no file and changes no container.
+    With `stage_image` the dry run also builds/pulls the image (used by
+    `--replace` before it stops anything); `image_staged` then makes the real
+    start use that local image instead of pulling again. `stall_timeout` /
+    `ready_timeout` bound the readiness wait.
 
     `use_default_image=True` mirrors llama.cpp's flag of the same name (and the
     TUI's "Default Image" selection): drop the profile's pinned image_tag for
@@ -764,16 +806,19 @@ async def stream_container_up(
         yield ("rc", 1)
         return
 
-    try:
-        conflict = await check_port_conflict(profile)
-    except (OSError, RuntimeError, ValueError) as exc:
-        yield ("log", f"Error: port conflict probe failed — {exc}")
-        yield ("rc", 1)
-        return
-    if conflict:
-        yield ("log", f"Error: Port {profile.port} is already in use by {conflict}")
-        yield ("rc", 1)
-        return
+    # Dry run leaves port ownership to the CLI pre-flight: under --replace the
+    # port is still held by the model about to be stopped.
+    if not dry_run:
+        try:
+            conflict = await check_port_conflict(profile)
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"Error: port conflict probe failed — {exc}")
+            yield ("rc", UNREACHABLE)
+            return
+        if conflict:
+            yield ("log", f"Error: Port {profile.port} is already in use by {conflict}")
+            yield ("rc", CONFLICT)
+            return
 
     ok, messages = _ensure_common_env(profile)
     for message in messages:
@@ -783,7 +828,10 @@ async def stream_container_up(
         return
 
     try:
-        ok, messages = _ensure_profile_config(profile)
+        ok, messages = (
+            _ensure_profile_config(profile, dry_run=True) if dry_run
+            else _ensure_profile_config(profile)
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"Error: cannot save {profile_name} — {exc}")
         yield ("rc", 1)
@@ -795,7 +843,10 @@ async def stream_container_up(
         return
 
     try:
-        profile, _ = _render_profile_snapshot(profile_name)
+        profile, _ = (
+            _render_profile_snapshot(profile_name, write=False) if dry_run
+            else _render_profile_snapshot(profile_name)
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"Error: cannot render {profile_name}.env — {exc}")
         yield ("log", "  Fix the value in profiles.yaml (e.g. `llmux profile edit "
@@ -826,7 +877,7 @@ async def stream_container_up(
         gpu_conflicts = await _gpu_conflict_messages(profile)
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"Error: GPU conflict probe failed — {exc}")
-        yield ("rc", 1)
+        yield ("rc", UNREACHABLE)
         return
     for message in gpu_conflicts:
         yield ("log", message)
@@ -855,10 +906,13 @@ async def stream_container_up(
                 )
         except RuntimeError as exc:
             yield ("log", f"Error: Docker image probe failed — {exc}")
-            yield ("rc", 1)
+            yield ("rc", UNREACHABLE)
             return
 
-        if needs_build:
+        plan_extra = {"build": True} if needs_build else {}
+        if needs_build and dry_run and not stage_image:
+            yield ("log", "Dry run: dev image would be built first.")
+        elif needs_build:
             if exists:
                 yield (
                     "log",
@@ -875,13 +929,14 @@ async def stream_container_up(
                         continue
                     yield event
 
-        yield ("log", f"Using image: {VLLM_DEV_SPEC.image_prefix}:{image_tag}")
+        plan_image = f"{VLLM_DEV_SPEC.image_prefix}:{image_tag}"
+        yield ("log", f"Using image: {plan_image}")
         env = _compose_env(profile, use_dev=True, image_tag=image_tag)
         compose_cmd = [
             "docker",
             "compose",
             *compose_files,
-            *_env_file_args(profile),
+            *_env_file_args(profile, rendered=True),
             "-p",
             profile.name,
             "up",
@@ -908,7 +963,7 @@ async def stream_container_up(
                 exists = await dev_build.image_exists_locally(VLLM_DEV_SPEC, dev_tag)
             except RuntimeError as exc:
                 yield ("log", f"Error: Docker image probe failed — {exc}")
-                yield ("rc", 1)
+                yield ("rc", UNREACHABLE)
                 return
             if not exists:
                 yield ("log", f"Error: Dev image {profile.image_tag} not found locally.")
@@ -916,7 +971,8 @@ async def stream_container_up(
                 yield ("log", f"  uv run llmux image build-dev --backend vllm --tag {dev_tag}")
                 yield ("rc", 1)
                 return
-        yield ("log", f"Using image: {profile.image_tag}")
+        plan_image, plan_extra = profile.image_tag, {}
+        yield ("log", f"Using image: {plan_image}")
         env = _compose_env(profile, use_dev=False, vllm_image=profile.image_tag)
         pull_policy = (
             "never" if profile.image_tag.startswith(f"{VLLM_DEV_SPEC.image_prefix}:")
@@ -927,7 +983,7 @@ async def stream_container_up(
             "docker",
             "compose",
             *compose_files,
-            *_env_file_args(profile),
+            *_env_file_args(profile, rendered=True),
             "-p",
             profile.name,
             "up",
@@ -949,7 +1005,7 @@ async def stream_container_up(
                 version_tag = await get_local_latest_tag()
             except RuntimeError as exc:
                 yield ("log", f"Error: could not list local images — {exc}")
-                yield ("rc", 1)
+                yield ("rc", UNREACHABLE)
                 return
         if version_tag == "latest":
             # Refuse the `:latest` alias outright. It doesn't describe the image's
@@ -969,7 +1025,7 @@ async def stream_container_up(
                 release_version = await get_dockerhub_release_version()
             except RuntimeError as exc:
                 yield ("log", f"Error: could not resolve the release image — {exc}")
-                yield ("rc", 1)
+                yield ("rc", UNREACHABLE)
                 return
             if release_version == "unknown":
                 yield (
@@ -978,7 +1034,7 @@ async def stream_container_up(
                     "is unreachable. Pull a specific version first: "
                     "docker pull vllm/vllm-openai:<version>",
                 )
-                yield ("rc", 1)
+                yield ("rc", UNREACHABLE)
                 return
             version_tag = release_version
             resolved_remote_release = True
@@ -991,12 +1047,13 @@ async def stream_container_up(
                 exists = await dev_build.image_exists_locally(VLLM_DEV_SPEC, dev_tag)
             except RuntimeError as exc:
                 yield ("log", f"Error: Docker image probe failed — {exc}")
-                yield ("rc", 1)
+                yield ("rc", UNREACHABLE)
                 return
             if not exists:
                 yield ("log", f"Error: Dev image {image_ref} not found locally. Build it first: llmux image build-dev --backend vllm --tag {dev_tag}")
                 yield ("rc", 1)
                 return
+        plan_image, plan_extra = image_ref, {}
         yield ("log", f"Using image: {image_ref}")
         if explicit_image_ref:
             env = _compose_env(
@@ -1008,7 +1065,7 @@ async def stream_container_up(
             "docker",
             "compose",
             *compose_files,
-            *_env_file_args(profile),
+            *_env_file_args(profile, rendered=True),
             "-p",
             profile.name,
             "up",
@@ -1023,6 +1080,24 @@ async def stream_container_up(
         else:
             compose_cmd.extend(["--pull", "never"])
 
+    if image_staged:
+        compose_cmd[compose_cmd.index("--pull") + 1] = "never"
+
+    if dry_run:
+        if stage_image:
+            policy = compose_cmd[compose_cmd.index("--pull") + 1]
+            async with aclosing(prepare.secure_image(plan_image, policy, stage=stage_image)) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "rc":
+                        if int(event[1]) != 0:
+                            yield event
+                            return
+                    else:
+                        yield event
+        yield ("plan", {"command": compose_cmd, "image": plan_image, **plan_extra})
+        yield ("rc", 0)
+        return
+
     async with aclosing(stream_command(compose_cmd, cwd=SCRIPT_DIR, env=env)) as _owned_stream:
         async for event in _owned_stream:
             if event[0] != "rc":
@@ -1035,17 +1110,50 @@ async def stream_container_up(
                 return
 
             ok = False
+            outcome = "error"
+            crashed_id = ""
             val_messages: list[str] = []
-            async with aclosing(_post_start_validation(profile, hf_cache_path=env.get('HF_CACHE_PATH') or None)) as _owned_stream:
+            async with aclosing(
+                _post_start_validation(
+                    profile,
+                    timeout=stall_timeout,
+                    max_wait=ready_timeout,
+                    hf_cache_path=env.get('HF_CACHE_PATH') or None,
+                )
+            ) as _owned_stream:
                 async for ev in _owned_stream:
                     if ev[0] == "result":
                         ok, val_messages = ev[1], ev[2]
+                        outcome = ev[3] if len(ev) > 3 else ("ready" if ok else "error")
+                        crashed_id = ev[4] if len(ev) > 4 else ""
                     else:
                         yield ev
             for message in val_messages:
                 yield ("log", message)
+            if outcome == "crashed":
+                # Remove exactly the container that crashed — never one a later `up` created.
+                if crashed_id:
+                    rm_rc, rm_out = await run_command("docker", "rm", "-f", crashed_id, timeout=30)
+                    yield (
+                        "log",
+                        f"Removed crashed container {profile.container_name} ({crashed_id[:12]})."
+                        if rm_rc == 0
+                        else f"Error: could not remove crashed container {crashed_id[:12]}: {rm_out.strip()}",
+                    )
+                else:
+                    yield ("log", f"Warning: crashed container {profile.container_name} could not be identified; left in place.")
+                yield ("rc", ERROR)
+                return
+            if outcome == "stalled":
+                yield (
+                    "log",
+                    f"Error: {profile.name} is not ready yet; it is still running. "
+                    f"Wait with: llmux wait {profile.name}",
+                )
+                yield ("rc", NOT_READY)
+                return
             if not ok:
-                yield ("rc", 1)
+                yield ("rc", UNREACHABLE if outcome == "unreachable" else ERROR)
                 return
 
             yield ("log", f"{profile.name} started successfully!")

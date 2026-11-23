@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from tui.common import docker, profile_store
 from tui.common.adapter import DashboardRow
-from tui.common.conflicts import external_port_conflicts, gpu_conflicts, port_conflicts
+from tui.common.conflicts import (
+    external_port_conflicts,
+    gpu_conflicts,
+    local_port_in_use,
+    port_conflicts,
+    published_tcp_host_ports,
+)
 
 
 async def plan_switch(backend: str, name: str) -> tuple[profile_store.StoredProfile, list[profile_store.StoredProfile]]:
@@ -22,7 +28,17 @@ async def plan_switch(backend: str, name: str) -> tuple[profile_store.StoredProf
     sources = [r for r in rows if gpu_conflicts(row, [r])]
     remaining = [r for r in rows if r not in sources]
     errors = port_conflicts(row, remaining)
-    errors += external_port_conflicts(row, rows, await docker.running_container_ports())
+    published = await docker.running_container_ports()
+    errors += external_port_conflicts(row, rows, published)
+    source_names = {r.container_name for r in sources}
+    held_by_source = row.port is not None and any(
+        row.port in published_tcp_host_ports(ports)
+        for name, ports in published.items() if name in source_names
+    )
+    # A non-docker process on the port would only show up after the old model stopped.
+    if not errors and row.port is not None and not held_by_source:
+        if local_port_in_use(row.port, "127.0.0.1"):
+            errors.append(f"Port {row.port} is used by another local process on 127.0.0.1")
     if errors:
         raise RuntimeError("\n".join(errors))
     return target, [r.raw for r in sources]
@@ -50,3 +66,15 @@ async def stop_switch_sources(
     final_target, remaining = await plan_switch(target.backend, target.name)
     if final_target != target or remaining:
         raise RuntimeError("Profiles or running models changed; the new model was not started.")
+
+
+async def precheck_errors(stream) -> list[str]:
+    """Drain a dry-run start stream; return its error lines ([] when it passed)."""
+    errors: list[str] = []
+    rc = 1
+    async for event in stream:
+        if event[0] == "log" and str(event[1]).lstrip().startswith(("Error", "✗")):
+            errors.append(str(event[1]).strip())
+        elif event[0] == "rc":
+            rc = int(event[1])
+    return [] if rc == 0 else errors or [f"start check failed (exit {rc})"]

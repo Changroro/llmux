@@ -7,6 +7,7 @@ Subcommands provide non-interactive access for scripts and agents.
 from __future__ import annotations
 
 import re
+import sys
 
 import typer
 
@@ -33,6 +34,10 @@ def _interactive_session() -> bool:
     import sys
 
     if os.environ.get("CI") or os.environ.get("LLMUX_NONINTERACTIVE"):
+        return False
+    # A --json run's stdout belongs to its one record, and a --dry-run writes
+    # nothing: no wizard (.env.common), update check (cache, self-update) or prompt.
+    if {"--json", "--dry-run"} & set(sys.argv[1:]):
         return False
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -319,6 +324,10 @@ app.command(
 app.command("down", help="Stop a profile's container (alias for `container down`).")(
     _container.down
 )
+app.command(
+    "wait",
+    help="Wait until a started profile serves /v1/models (alias for `container wait`).",
+)(_container.wait)
 app.command("logs", help="Stream container logs (alias for `container logs`).")(
     _container.logs
 )
@@ -339,13 +348,52 @@ app.command(
 )(_container.stats)
 
 
+class _StderrTail:
+    """Tee stderr so a failed `--json` command can quote its last error."""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self.text = ""
+
+    def write(self, data: str) -> int:
+        self.text = (self.text + data)[-4000:]
+        return self._stream.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _error_text(captured: str) -> str:
+    lines = (re.sub(r"[╭╮╰╯│─]+", " ", line).strip() for line in captured.splitlines())
+    kept = [line for line in lines if line and not line.startswith(("Usage:", "Try '"))]
+    return " ".join(kept)[-1000:] or "command failed"
+
+
 def main() -> None:
-    """Console-script entrypoint (`llmux` in pyproject.scripts)."""
+    """Console-script entrypoint (`llmux` in pyproject.scripts).
+
+    With --json, a failure that printed no JSON record still ends with
+    `{"ok": false, "code": <exit code>, "error": ...}` on stdout.
+    """
+    from tui.cli._runtime import emit_json, json_emitted
+
+    tail = _StderrTail(sys.stderr) if "--json" in sys.argv[1:] else None
+    if tail is not None:
+        sys.stderr = tail
     try:
-        app()
-    except (OSError, RuntimeError, ValueError) as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise SystemExit(2) from None
+        try:
+            app()
+        except (OSError, RuntimeError, ValueError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise SystemExit(2) from None
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        if tail is not None and code != 0 and not json_emitted():
+            emit_json({"ok": False, "code": code, "error": _error_text(tail.text)})
+        raise
+    finally:
+        if tail is not None:
+            sys.stderr = tail._stream
 
 
 if __name__ == "__main__":

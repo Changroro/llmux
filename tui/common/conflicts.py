@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import ipaddress
+import socket
 import re
 
 from tui.common.adapter import DashboardRow
@@ -185,6 +187,22 @@ def gpu_conflicts(target: DashboardRow, rows: list[DashboardRow]) -> list[str]:
                 f"(container '{r.container_name}')"
             )
     return msgs
+
+
+def local_port_in_use(port: int, host: str) -> bool:
+    """True when a host socket already holds `host:port` (what docker would bind)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # SO_REUSEADDR: ignore our own probes' TIME_WAIT; a LISTENing socket still conflicts.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, int(port)))
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            return True
+        raise RuntimeError(f"local port bind probe failed for {host}:{port}: {exc}") from exc
+    finally:
+        sock.close()
+    return False
 
 
 def _format_backend(name: str) -> str:

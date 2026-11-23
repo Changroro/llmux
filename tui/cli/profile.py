@@ -23,12 +23,16 @@ from tui.backends.llamacpp.defaults import (
 )
 from tui.cli._runtime import (
     BACKENDS,
+    JSON_OPTION,
     detect_backend,
     emit_json,
     emit_table,
+    json_command,
+    model_source,
     run_async,
 )
 from tui.common import profile_store
+from tui.common.readiness import profile_port
 
 app = typer.Typer(help="Profile CRUD + quick-setup.", no_args_is_help=True)
 
@@ -37,10 +41,12 @@ def _profile_to_row(p: profile_store.StoredProfile) -> dict:
     return {
         "backend": p.backend,
         "name": p.name,
-        "port": p.port,
+        "port": profile_port(p),
         "gpu_id": p.gpu_id,
         "config": p.config_name or p.name,
-        "model": p.model_id or p.model_file or "",
+        "model": model_source(p),
+        "hf_repo": p.hf_repo or None,
+        "hf_file": p.hf_file or None,
     }
 
 
@@ -81,6 +87,8 @@ def show_profile(
     sp = profile_store.load_profile(name, bk)
     data = asdict(sp)
     data["container_name"] = sp.container_name or sp.name
+    data["port"] = profile_port(sp)
+    data["model"] = model_source(sp)
     data["env_vars"] = {
         key: (
             {"set": True, "length": len(value)}
@@ -273,6 +281,7 @@ def _parse_set_kv(items: list[str], *, backend: str = "") -> dict[str, str]:
 
 
 @app.command("new")
+@json_command
 def new_profile(
     name: str = typer.Argument(..., help="Profile name (alphanumeric, dash, underscore)."),
     backend: str = typer.Option(
@@ -311,6 +320,7 @@ def new_profile(
     model_file: str = typer.Option("", "--model-file", help="llama.cpp: GGUF filename."),
     hf_repo: str = typer.Option("", "--hf-repo", help="llama.cpp: Hugging Face repo for download."),
     hf_file: str = typer.Option("", "--hf-file", help="llama.cpp: HF file for download."),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Create a new profile entry in profiles.yaml."""
     if backend not in BACKENDS:
@@ -384,9 +394,11 @@ def new_profile(
     )
     profile_store.create_profile(sp)
     print(f"Created profile '{name}' (backend={backend})")
+    return {"action": "created", "profile": _profile_to_row(sp)}
 
 
 @app.command("edit")
+@json_command
 def edit_profile(
     name: str = typer.Argument(..., help="Profile name."),
     backend: Optional[str] = typer.Option(None, "--backend", "-b"),
@@ -425,6 +437,7 @@ def edit_profile(
         None, "--image-tag",
         help="Docker image override (e.g. 'llamacpp-dev:mtp_main'). Pass empty string to clear.",
     ),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Edit fields of an existing profile (only specified options change)."""
     bk = detect_backend(name, override=backend)
@@ -517,6 +530,7 @@ def edit_profile(
 
     profile_store.update_profile(name, bk, apply_updates)
     print(f"Updated profile '{name}' (backend={bk})")
+    return {"action": "updated", "profile": _profile_to_row(profile_store.load_profile(name, bk))}
 
 
 def _require_stopped(sp: profile_store.StoredProfile, *, action: str) -> None:
@@ -540,10 +554,12 @@ def _require_stopped(sp: profile_store.StoredProfile, *, action: str) -> None:
 
 
 @app.command("rename")
+@json_command
 def rename_profile(
     old: str = typer.Argument(..., help="Existing profile name."),
     new: str = typer.Argument(..., help="New profile name."),
     backend: Optional[str] = typer.Option(None, "--backend", "-b"),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Rename a profile. Requires its container to be stopped."""
     bk = detect_backend(old, override=backend)
@@ -559,13 +575,16 @@ def rename_profile(
     print(f"Renamed profile '{old}' → '{new}' (backend={bk})")
     print(f"  container: {renamed.container_name or renamed.name}")
     print(f"  config:    {renamed.config_name or renamed.name}")
+    return {"action": "renamed", "old": old, "profile": _profile_to_row(renamed)}
 
 
 @app.command("clone")
+@json_command
 def clone_profile(
     src: str = typer.Argument(..., help="Profile to copy from."),
     dst: str = typer.Argument(..., help="New profile name."),
     backend: Optional[str] = typer.Option(None, "--backend", "-b"),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Clone SRC to a new profile DST (same backend, same linked config)."""
     bk = detect_backend(src, override=backend)
@@ -588,9 +607,11 @@ def clone_profile(
     print(f"  config:    {sp.config_name or sp.name}")
     if sp.port:
         print(f"  port:      {sp.port}  (same as '{src}' — change it before running both)")
+    return {"action": "cloned", "source": src, "profile": _profile_to_row(sp)}
 
 
 @app.command("delete")
+@json_command
 def delete_profile(
     name: str = typer.Argument(..., help="Profile name."),
     backend: Optional[str] = typer.Option(None, "--backend", "-b"),
@@ -598,6 +619,7 @@ def delete_profile(
         False, "--with-config", help="Also delete the linked config YAML."
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Delete a profile (and optionally its linked config)."""
     bk = detect_backend(name, override=backend)
@@ -611,7 +633,9 @@ def delete_profile(
         suffix = " AND its config YAML" if with_config else ""
         confirm = typer.confirm(f"Delete profile '{name}' (backend={bk}){suffix}?")
         if not confirm:
-            raise typer.Exit(code=0)
+            # Declining is not an error: exit 0, and a --json record says so.
+            typer.echo("Declined: nothing was changed.", err=True)
+            return {"action": "declined", "profile": name, "backend": bk}
 
     if with_config:
         if bk == "vllm":
@@ -625,6 +649,7 @@ def delete_profile(
     else:
         profile_store.delete_profile(name, bk)
     print(f"Deleted profile '{name}' (backend={bk})")
+    return {"action": "deleted", "profile": name, "backend": bk, "config_deleted": with_config}
 
 
 
@@ -647,6 +672,7 @@ def _normalize_hf_repo(raw: str) -> str:
 
 
 @app.command("quick-setup")
+@json_command
 def quick_setup(
     model: Optional[str] = typer.Argument(
         None,
@@ -731,6 +757,7 @@ def quick_setup(
         "", "--copy-from",
         help="Copy extra_params (vLLM) / all params (llama.cpp) from an existing config name.",
     ),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Create a profile + config in one step (mirrors TUI Quick Setup, both backends)."""
     if backend not in BACKENDS:
@@ -764,7 +791,7 @@ def quick_setup(
 
     if backend == "vllm":
         _validate_gpu_mem(gpu_memory_utilization)
-        _quick_setup_vllm(
+        final_name = _quick_setup_vllm(
             model=model,
             name=name,
             # `0` = backend default — resolved through effective_defaults() so a
@@ -780,7 +807,7 @@ def quick_setup(
             recipe_variant=recipe_variant,
             recipe_features=recipe_feature,
         )
-        return
+        return _quick_setup_record(final_name, "vllm")
 
     # llama.cpp path: warn (don't fail) if the positional MODEL was supplied —
     # it's meaningless here (HF model id makes no sense for a GGUF profile) and
@@ -801,7 +828,7 @@ def quick_setup(
             err=True,
         )
 
-    _quick_setup_llamacpp(
+    final_name = _quick_setup_llamacpp(
         hf_repo=hf_repo,
         hf_file=hf_file,
         name=name,
@@ -817,6 +844,12 @@ def quick_setup(
         override_tensors=override_tensors,
         copy_config_from=copy_config_from,
     )
+    return _quick_setup_record(final_name, "llamacpp")
+
+
+def _quick_setup_record(name: str, backend: str) -> dict:
+    sp = profile_store.load_profile(name, backend)
+    return {"action": "created", "profile": _profile_to_row(sp), "config": sp.config_name or sp.name}
 
 
 def _quick_setup_vllm(
@@ -923,6 +956,7 @@ def _quick_setup_vllm(
             )
         )
     print(f"Created profile + config: {final_name}")
+    return final_name
 
 
 def _quick_setup_llamacpp(
@@ -1091,3 +1125,4 @@ def _quick_setup_llamacpp(
             )
         )
     print(f"Created profile + config: {final_name}")
+    return final_name

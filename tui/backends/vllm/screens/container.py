@@ -32,6 +32,7 @@ from tui.backends.vllm.backend import (
     get_dockerhub_release_version,
     get_dockerhub_nightly_date,
 )
+from tui.common.exit_codes import NOT_READY
 from tui.common.i18n import t
 from tui.common.dev_build import image_tag_error
 from tui.backends.vllm.backend_inspect import resolve_vllm_image_ref
@@ -528,7 +529,20 @@ class ContainerUpScreen(Screen):
 
         from tui.common.widgets import confirm_model_switch
 
-        if not await confirm_model_switch(self, "vllm", self.profile_name):
+        start_options = dict(
+            use_dev=use_dev, use_default_image=use_default_image, tag=tag, pull=pull,
+            repo_url=repo_url, branch=branch,
+        )
+        staged = False
+
+        def precheck():
+            nonlocal staged
+            staged = True  # only reached when a model is switched out
+            return stream_container_up(
+                self.profile_name, dry_run=True, stage_image=True, **start_options
+            )
+
+        if not await confirm_model_switch(self, "vllm", self.profile_name, precheck=precheck):
             return
 
         # Always keep the runtime bind check enabled right before compose up.
@@ -564,7 +578,7 @@ class ContainerUpScreen(Screen):
 
         # Stream backend startup output in real-time
         rc = -1
-        async with aclosing(stream_container_up(self.profile_name, use_dev=use_dev, use_default_image=use_default_image, tag=tag, pull=pull, repo_url=repo_url, branch=branch)) as _owned_stream:
+        async with aclosing(stream_container_up(self.profile_name, image_staged=staged, **start_options)) as _owned_stream:
             async for (msg_type, data) in _owned_stream:
                 if msg_type == "log":
                     try:
@@ -575,8 +589,16 @@ class ContainerUpScreen(Screen):
                     rc = data
 
         try:
-            if rc == 0:
-                status.update(t("[green bold]Container started. Logs: (Esc/q to close)[/green bold]", "[green bold]컨테이너 시작됨. 로그: (Esc/q 로 닫기)[/green bold]"))
+            if rc in (0, NOT_READY):
+                if rc == 0:
+                    status.update(t("[green bold]Container started. Logs: (Esc/q to close)[/green bold]", "[green bold]컨테이너 시작됨. 로그: (Esc/q 로 닫기)[/green bold]"))
+                else:
+                    status.update(t(
+                        "[yellow bold]Still loading — the container keeps running. Following its logs; "
+                        "the dashboard shows when it is ready (Esc/q to close).[/yellow bold]",
+                        "[yellow bold]아직 로딩 중 — 컨테이너는 계속 실행됩니다. 로그를 따라갑니다. "
+                        "준비되면 대시보드에 표시됩니다 (Esc/q 로 닫기).[/yellow bold]",
+                    ))
                 try:
                     async with aclosing(stream_container_logs(self._profile.container_name)) as _owned_stream:
                         async for line in _owned_stream:

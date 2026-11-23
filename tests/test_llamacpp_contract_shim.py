@@ -1,0 +1,209 @@
+"""llama.cpp honors the shared `up` contract (dry_run, timeouts, --replace precheck)."""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from unittest.mock import AsyncMock
+
+import pytest
+from typer.testing import CliRunner
+
+from tui.backends.llamacpp import backend_runtime as rt
+from tui.common import profile_store
+
+_REAL_ENSURE_PROFILE_CONFIG = rt._ensure_profile_config
+
+
+@pytest.fixture
+def llama_profile(monkeypatch, tmp_path):
+    stored = profile_store.StoredProfile(name="lp", backend="llamacpp", container_name="lp", port=8080, gpu_id="0")
+    profile = rt.Profile(name="lp", container_name="lp", port=8080, image_tag="ghcr.io/ggml-org/llama.cpp:server-cuda")
+    commands: list = []
+    seen: dict = {}
+
+    class Store:
+        @staticmethod
+        def load_profile(_name, _backend):
+            return stored
+
+        @staticmethod
+        @contextmanager
+        def storage_transaction():
+            yield
+
+    async def compose(cmd, **_kwargs):
+        commands.append(cmd)
+        yield ("rc", 0)
+
+    async def validation(_profile, **kwargs):
+        seen.update(kwargs)
+        yield ("result", True, [])
+
+    monkeypatch.setattr(rt, "profile_store", Store)
+    monkeypatch.setattr(rt, "validate_common_env", lambda _p: (True, []))
+    monkeypatch.setattr(rt, "load_profile", lambda _n: profile)
+    monkeypatch.setattr(rt, "check_port_conflict", AsyncMock(return_value="profile 'old'"))
+    monkeypatch.setattr(rt, "_gpu_conflict_messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(rt, "_ensure_profile_config", lambda *_a, **_k: (True, []))
+    monkeypatch.setattr(rt, "_render_profile_snapshot", lambda _n, **_k: (profile, tmp_path / "lp.env"))
+    monkeypatch.setattr(rt, "_render_override", AsyncMock(return_value=(0, "")))
+    monkeypatch.setattr(rt, "_compose_env", lambda _p: {})
+    monkeypatch.setattr(rt, "_stream", compose)
+    monkeypatch.setattr(rt, "_post_start_validation", validation)
+    monkeypatch.setattr(rt.prepare, "image_present", AsyncMock(return_value=True))
+    return commands, seen
+
+
+@pytest.mark.asyncio
+async def test_dry_run_plans_without_port_probe_or_compose(llama_profile):
+    commands, _ = llama_profile
+    events = [e async for e in rt.stream_container_up("lp", dry_run=True)]
+    plans = [data for kind, data in events if kind == "plan"]
+    assert events[-1] == ("rc", 0)
+    assert plans and plans[0]["image"] == "ghcr.io/ggml-org/llama.cpp:server-cuda"
+    assert "up" in plans[0]["command"]
+    assert commands == []
+    rt.check_port_conflict.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_timeouts_reach_validation(llama_profile, monkeypatch):
+    commands, seen = llama_profile
+    monkeypatch.setattr(rt, "check_port_conflict", AsyncMock(return_value=None))
+    events = [e async for e in rt.stream_container_up("lp", stall_timeout=90.0, ready_timeout=300.0)]
+    assert events[-1] == ("rc", 0)
+    assert seen["timeout"] == 90.0 and seen["max_wait"] == 300.0
+
+
+def _cli(monkeypatch, *args):
+    from tui.cli import app, container
+
+    monkeypatch.setattr(container, "detect_backend", lambda *a, **k: "llamacpp")
+    monkeypatch.setattr(container, "gather_conflict_warnings", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        container.profile_store, "load_profile",
+        lambda name, backend: profile_store.StoredProfile(name=name, backend=backend, port=8080),
+    )
+    return CliRunner().invoke(app, ["up", "lp", *args])
+
+
+def test_cli_up_dry_run_on_llamacpp(llama_profile, monkeypatch):
+    result = _cli(monkeypatch, "--dry-run", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["plan"]["image"] == "ghcr.io/ggml-org/llama.cpp:server-cuda"
+
+
+def test_cli_up_timeout_on_llamacpp(llama_profile, monkeypatch):
+    commands, seen = llama_profile
+    monkeypatch.setattr(rt, "check_port_conflict", AsyncMock(return_value=None))
+    result = _cli(monkeypatch, "--timeout", "60", "--stall-timeout", "30")
+    assert result.exit_code == 0, result.stderr
+    assert seen["max_wait"] == 60 and seen["timeout"] == 30
+
+
+def test_cli_up_replace_on_llamacpp(llama_profile, monkeypatch):
+    from tui.common import model_switch
+
+    commands, _ = llama_profile
+    order: list = []
+    old = profile_store.StoredProfile(name="old", backend="vllm", container_name="old", port=8080, gpu_id="0")
+    monkeypatch.setattr(model_switch, "plan_switch", AsyncMock(return_value=(object(), [old])))
+
+    async def stop(_target, _sources):
+        order.append("stop")
+        rt.check_port_conflict.return_value = None
+
+    monkeypatch.setattr(model_switch, "stop_switch_sources", stop)
+    real_up = rt.stream_container_up
+
+    def tracking_up(name, **kwargs):
+        order.append("check" if kwargs.get("dry_run") else "up")
+        return real_up(name, **kwargs)
+
+    monkeypatch.setattr(rt, "stream_container_up", tracking_up)
+    result = _cli(monkeypatch, "--replace")
+    assert result.exit_code == 0, result.stderr
+    assert order == ["check", "stop", "up"]
+    assert len(commands) == 1
+
+
+def _real_config_env(monkeypatch, tmp_path, config_text):
+    from tui.backends.llamacpp import backend as lbackend
+
+    stored = profile_store.StoredProfile(name="lp", backend="llamacpp", container_name="lp", port=8080, config_name="lp")
+    if config_text is not None:
+        (tmp_path / "lp.yaml").write_text(config_text)
+    monkeypatch.setattr(rt, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(lbackend, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(rt, "_ensure_profile_config", _REAL_ENSURE_PROFILE_CONFIG)
+    return stored
+
+
+def test_dry_run_still_rejects_an_empty_config(llama_profile, monkeypatch, tmp_path):
+    from tui.backends.llamacpp import backend as lbackend
+
+    stored = _real_config_env(monkeypatch, tmp_path, "")
+    monkeypatch.setattr(rt.profile_store, "load_profile", lambda *_a: stored, raising=False)
+    monkeypatch.setattr(rt, "load_config", lbackend.load_config)
+    ok, messages = rt._ensure_profile_config(stored, rt.Profile(name="lp"), dry_run=True)
+    assert ok is False and any("비어" in m for m in messages)
+
+
+def test_dry_run_reports_but_never_creates_a_missing_config(llama_profile, monkeypatch, tmp_path):
+    from tui.backends.llamacpp import backend as lbackend
+
+    stored = _real_config_env(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(rt.profile_store, "load_profile", lambda *_a: stored, raising=False)
+    monkeypatch.setattr(rt, "load_config", lbackend.load_config)
+    ok, messages = rt._ensure_profile_config(stored, rt.Profile(name="lp"), dry_run=True)
+    assert ok is True and any("Dry run" in m for m in messages)
+    assert not (tmp_path / "lp.yaml").exists()
+
+
+def test_cli_replace_on_llamacpp_with_bad_config_stops_nothing(llama_profile, monkeypatch):
+    from tui.common import model_switch
+
+    old = profile_store.StoredProfile(name="old", backend="vllm", container_name="old", port=8080, gpu_id="0")
+    monkeypatch.setattr(model_switch, "plan_switch", AsyncMock(return_value=(object(), [old])))
+    stop = AsyncMock()
+    monkeypatch.setattr(model_switch, "stop_switch_sources", stop)
+    monkeypatch.setattr(
+        rt, "_ensure_profile_config",
+        lambda *_a, **_k: (False, ["✗ config 'lp' 가 비어 있습니다"]),
+    )
+    result = _cli(monkeypatch, "--replace")
+    assert result.exit_code == 1
+    stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_with_missing_config_still_plans(llama_profile, monkeypatch, tmp_path):
+    commands, _ = llama_profile
+    monkeypatch.setattr(rt, "CONFIG_DIR", tmp_path)
+    render = AsyncMock(return_value=(1, "config 파일 없음"))
+    monkeypatch.setattr(rt, "_render_override", render)
+    events = [e async for e in rt.stream_container_up("lp", dry_run=True)]
+    assert events[-1] == ("rc", 0)
+    render.assert_not_awaited()
+    assert not list(tmp_path.iterdir())
+
+
+def test_cli_replace_stops_nothing_when_the_image_cannot_be_pulled(llama_profile, monkeypatch):
+    from tui.common import model_switch
+
+    old = profile_store.StoredProfile(name="old", backend="vllm", container_name="old", port=8080, gpu_id="0")
+    monkeypatch.setattr(model_switch, "plan_switch", AsyncMock(return_value=(object(), [old])))
+    stop = AsyncMock()
+    monkeypatch.setattr(model_switch, "stop_switch_sources", stop)
+    monkeypatch.setattr(rt.prepare, "image_present", AsyncMock(return_value=False))
+
+    async def failing_pull(_ref):
+        yield ("log", "manifest unknown")
+        yield ("rc", 1)
+
+    monkeypatch.setattr(rt.prepare, "stream_pull", failing_pull)
+    result = _cli(monkeypatch, "--replace")
+    assert result.exit_code == 1
+    assert "could not pull" in result.stderr
+    stop.assert_not_awaited()

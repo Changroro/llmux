@@ -12,12 +12,17 @@ from tui.cli._runtime import (
     docker_logs_once,
     emit_json,
     emit_table,
+    fail,
+    finish_stream,
     gather_conflict_warnings,
     partition_conflict_warnings,
     run_async,
     stream_async,
 )
+from tui.common import docker as common_docker
 from tui.common import profile_store
+from tui.common.exit_codes import CONFLICT, ERROR, INTERRUPTED, UNREACHABLE, USAGE
+from tui.common.readiness import profile_port
 from tui.common.dev_build import repo_url_error
 from tui.common.http import (
     BENCH_MAX_TOKENS,
@@ -38,6 +43,19 @@ class _MetricsProbeFailed(RuntimeError):
         self.failures = tuple(failures)
         super().__init__("; ".join(failures))
 
+
+
+_JSON_OPTION = typer.Option(
+    False, "--json", help="Logs go to stderr; stdout gets one JSON result record."
+)
+
+
+def _stream_up(bk: str, profile: str, **kwargs):
+    if bk == "vllm":
+        from tui.backends.vllm.backend_runtime import stream_container_up
+    else:
+        from tui.backends.llamacpp.backend_runtime import stream_container_up
+    return stream_container_up(profile, **kwargs)
 
 
 @app.command("up")
@@ -88,33 +106,53 @@ def up(
              "always abort.",
     ),
     replace: bool = typer.Option(
-        False, "--replace", help="Stop llmux models sharing this profile's GPUs before starting it.",
+        False, "--replace",
+        help="Stop llmux models sharing this profile's GPUs before starting it — "
+             "only after every start check passed, the port is free on the host "
+             "and the image is pulled/built.",
     ),
+    stall_timeout: Optional[float] = typer.Option(
+        None, "--stall-timeout", min=1,
+        help="Seconds without log/download progress before startup counts as "
+             "stalled (default 45).",
+    ),
+    timeout: Optional[float] = typer.Option(
+        None, "--timeout", min=1,
+        help="Total seconds to wait for /v1/models once nothing is downloading "
+             "(default 1800). A stalled or timed-out server is left running and "
+             "exits 4; continue with `llmux wait`.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Validate and print the docker compose command. Writes no file and "
+             "never builds, pulls, stops or starts anything.",
+    ),
+    json_out: bool = _JSON_OPTION,
 ) -> None:
     """Start a profile's container. Streams compose output to stdout."""
+    record: dict = {"profile": profile}
     if replace and force:
         raise typer.BadParameter("--replace and --force are mutually exclusive")
     if dev and default_image:
-        typer.echo(
+        fail(
             "Error: --dev and --default-image are mutually exclusive (one forces a "
             "dev tag, the other clears any pinned image).",
-            err=True,
+            code=USAGE, json_out=json_out, record=record,
         )
-        raise typer.Exit(code=2)
-
     if tag and default_image:
-        typer.echo(
+        fail(
             "Error: --tag and --default-image are mutually exclusive (one names an "
             "image, the other falls back to the compose default).",
-            err=True,
+            code=USAGE, json_out=json_out, record=record,
         )
-        raise typer.Exit(code=2)
 
     error = repo_url_error(repo_url)
     if error:
         raise typer.BadParameter(error, param_hint="--repo-url")
 
     bk = detect_backend(profile, override=backend)
+    record["backend"] = bk
+    record["port"] = profile_port(profile_store.load_profile(profile, bk))
 
     if tag and not dev:
         from tui.common.dev_build import image_tag_error
@@ -126,76 +164,119 @@ def up(
             image_ref = resolve_vllm_image_ref(tag)
         error = image_tag_error(image_ref)
         if error:
-            typer.echo(f"Error: invalid image reference: {error}", err=True)
-            raise typer.Exit(code=2)
+            fail(f"Error: invalid image reference: {error}", code=USAGE, json_out=json_out, record=record)
 
-    try:
-        if replace:
-            from tui.common.model_switch import plan_switch, stop_switch_sources
+    up_kwargs: dict = dict(
+        use_dev=dev, use_default_image=default_image, tag=tag, pull=pull,
+        repo_url=repo_url, branch=branch,
+    )
+    if stall_timeout is not None:
+        up_kwargs["stall_timeout"] = stall_timeout
+    if timeout is not None:
+        up_kwargs["ready_timeout"] = timeout
 
-            async def replace_models():
-                target, sources = await plan_switch(bk, profile)
-                if sources:
-                    typer.echo("Stopping: " + ", ".join(f"{p.backend}/{p.name}" for p in sources))
-                    await stop_switch_sources(target, sources)
+    sources: list = []
+    if replace:
+        from tui.common.model_switch import plan_switch
 
-            run_async(replace_models())
-        warnings = run_async(gather_conflict_warnings(profile, bk))
-    except Exception as exc:
-        typer.echo(f"Conflict pre-flight failed: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
-    hard_conflicts, gpu_conflicts = partition_conflict_warnings(warnings)
-    blocking = hard_conflicts or (gpu_conflicts if not force else [])
-    if blocking:
-        typer.echo(
-            f"Conflict pre-flight: cannot start '{profile}' ({bk}) — "
-            f"{len(blocking)} issue(s) detected:",
-            err=True,
-        )
-        for warning in blocking:
-            typer.echo(f"  • {warning}", err=True)
-        if gpu_conflicts and not hard_conflicts:
-            typer.echo(
-                "Aborting. Re-run with --force to allow the GPU overlap.", err=True
-            )
-        else:
-            typer.echo("Aborting. Resolve the port check before retrying.", err=True)
-        raise typer.Exit(code=1)
-    if force and gpu_conflicts:
-        typer.echo("Warning: continuing despite GPU overlap:", err=True)
-        for warning in gpu_conflicts:
-            typer.echo(f"  • {warning}", err=True)
-
-    if bk == "vllm":
-        from tui.backends.vllm.backend_runtime import stream_container_up
-
-        rc = stream_async(
-            stream_container_up(
-                profile,
-                use_dev=dev,
-                use_default_image=default_image,
-                tag=tag,
-                pull=pull,
-                repo_url=repo_url,
-                branch=branch,
-            )
-        )
+        try:
+            target, sources = run_async(plan_switch(bk, profile))
+        except RuntimeError as exc:
+            try:
+                run_async(common_docker.container_snapshots())
+                code = CONFLICT
+            except RuntimeError:
+                code = UNREACHABLE
+            fail(f"Conflict pre-flight: cannot replace — {exc}", code=code, json_out=json_out, record=record)
     else:
-        from tui.backends.llamacpp.backend_runtime import stream_container_up as lc_up
+        try:
+            warnings = run_async(gather_conflict_warnings(profile, bk))
+        except Exception as exc:
+            fail(f"Conflict pre-flight failed: {exc}", code=UNREACHABLE, json_out=json_out, record=record)
+        hard_conflicts, gpu_conflicts = partition_conflict_warnings(warnings)
+        blocking = hard_conflicts or (gpu_conflicts if not force else [])
+        if blocking:
+            lines = [
+                f"Conflict pre-flight: cannot start '{profile}' ({bk}) — "
+                f"{len(blocking)} issue(s) detected:",
+                *(f"  • {warning}" for warning in blocking),
+                "Aborting. Re-run with --force to allow the GPU overlap."
+                if gpu_conflicts and not hard_conflicts
+                else "Aborting. Resolve the port check before retrying.",
+            ]
+            fail("\n".join(lines), code=CONFLICT, json_out=json_out, record=record)
+        if force and gpu_conflicts:
+            typer.echo("Warning: continuing despite GPU overlap:", err=True)
+            for warning in gpu_conflicts:
+                typer.echo(f"  • {warning}", err=True)
 
+    names = [f"{p.backend}/{p.name}" for p in sources]
+    sink: dict = {}
+    if dry_run:
+        if names:
+            typer.echo("Dry run: would stop " + ", ".join(names), err=True)
+            record["would_stop"] = names
+        rc = stream_async(_stream_up(bk, profile, **up_kwargs, dry_run=True), json_out=json_out, sink=sink)
+        finish_stream(rc, json_out=json_out, record=record, sink=sink)
+
+    if sources:
+        from tui.common.model_switch import stop_switch_sources
+
+        # Every start check runs — and the image is pulled/built — before anything is stopped.
         rc = stream_async(
-            lc_up(
-                profile,
-                use_dev=dev,
-                use_default_image=default_image,
-                tag=tag,
-                pull=pull,
-                repo_url=repo_url,
-                branch=branch,
-            )
+            _stream_up(bk, profile, **up_kwargs, dry_run=True, stage_image=True),
+            json_out=json_out, sink=sink, quiet=True,
         )
-    raise typer.Exit(code=rc)
+        if rc != 0:
+            finish_stream(rc, json_out=json_out, record=record, sink=sink)
+        sink.pop("plan", None)
+        typer.echo("Stopping: " + ", ".join(names), err=True)
+        try:
+            run_async(stop_switch_sources(target, sources))
+        except (OSError, RuntimeError, ValueError) as exc:
+            fail(f"Error: model switch aborted — {exc}", code=ERROR, json_out=json_out, record=record)
+        record["stopped"] = names
 
+    rc = stream_async(
+        _stream_up(bk, profile, **up_kwargs, image_staged=bool(sources)), json_out=json_out, sink=sink
+    )
+    finish_stream(rc, json_out=json_out, record=record, sink=sink)
+
+
+@app.command("wait")
+def wait(
+    profile: str = typer.Argument(..., help="Profile name (from profiles.yaml)."),
+    backend: Optional[str] = typer.Option(
+        None, "--backend", "-b", help="Force backend; auto-detect if omitted."
+    ),
+    timeout: float = typer.Option(
+        600.0, "--timeout", min=0, help="Seconds to wait before giving up (exit 4)."
+    ),
+    interval: float = typer.Option(
+        3.0, "--interval", "-i", min=0.1, help="Seconds between probes."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit one JSON result record."),
+) -> None:
+    """Block until a started profile serves /v1/models.
+
+    Exit 0 when ready, 4 when still loading at --timeout, 1 when the container
+    is missing or crashed, 5 when docker cannot be queried.
+    """
+    from tui.common.readiness import wait_ready
+
+    bk = detect_backend(profile, override=backend)
+    stored = profile_store.load_profile(profile, bk)
+    try:
+        code, message, models = run_async(wait_ready(stored, timeout=timeout, interval=interval))
+    except KeyboardInterrupt:
+        raise typer.Exit(code=INTERRUPTED)
+    record = {"profile": profile, "backend": bk, "port": profile_port(stored)}
+    if code != 0:
+        fail(f"Error: {message}", code=code, json_out=json_out, record=record)
+    if json_out:
+        emit_json({**record, "ok": True, "code": 0, "served_models": models})
+    else:
+        print(f"{message}: {', '.join(models)}")
 
 
 @app.command("prepare")
@@ -209,18 +290,17 @@ def prepare(
         help="Parallel download connections (HF caps each at a few MB/s). "
              "Overrides PREPARE_MAX_WORKERS from .env.common.",
     ),
+    json_out: bool = _JSON_OPTION,
 ) -> None:
     """Render runtime files and download weights without starting the server."""
     bk = detect_backend(profile, override=backend)
     if bk == "vllm":
         from tui.backends.vllm.backend_runtime import stream_container_prepare
-
-        rc = stream_async(stream_container_prepare(profile, max_workers=max_workers))
     else:
         from tui.backends.llamacpp.backend_runtime import stream_container_prepare
-
-        rc = stream_async(stream_container_prepare(profile, max_workers=max_workers))
-    raise typer.Exit(code=rc)
+    sink: dict = {}
+    rc = stream_async(stream_container_prepare(profile, max_workers=max_workers), json_out=json_out, sink=sink)
+    finish_stream(rc, json_out=json_out, record={"profile": profile, "backend": bk}, sink=sink)
 
 
 @app.command("down")
@@ -229,21 +309,23 @@ def down(
     backend: Optional[str] = typer.Option(
         None, "--backend", "-b", help="Force backend; auto-detect if omitted."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Emit one JSON result record."),
 ) -> None:
-    """Stop a profile's container."""
+    """Stop a profile's container. Stopping one that isn't running succeeds."""
     bk = detect_backend(profile, override=backend)
     if bk == "vllm":
         from tui.backends.vllm.backend_runtime import container_down
-
-        rc, msg = run_async(container_down(profile))
     else:
-        from tui.backends.llamacpp.backend_runtime import container_down as lc_down
-
-        rc, msg = run_async(lc_down(profile))
-    if msg:
-        print(msg.rstrip())
-    raise typer.Exit(code=rc)
-
+        from tui.backends.llamacpp.backend_runtime import container_down
+    rc, msg = run_async(container_down(profile))
+    msg = (msg or "").rstrip()
+    record = {"profile": profile, "backend": bk}
+    if rc != 0:
+        fail(f"Error: {msg}", code=rc, json_out=json_out, record=record)
+    if json_out:
+        emit_json({**record, "ok": True, "code": 0, "message": msg})
+    elif msg:
+        print(msg)
 
 
 @app.command("logs")
@@ -518,13 +600,22 @@ def ps(
         False, "--running", "-r", help="Only show running containers."
     ),
 ) -> None:
-    """List profiles and their container status across backends."""
+    """List profiles, their container status, and whether each one is serving.
+
+    `ready` is true once /v1/models answers; `served_models` lists its ids.
+    `ready` is null with `ready_error` when the server answered wrongly or its
+    API key could not be read.
+    `model` is the weights source (HF repo id or path) on both backends.
+    """
+    from tui.common.readiness import probe_served
+
     if backend and backend not in BACKENDS:
         raise typer.BadParameter(f"unknown backend: {backend}", param_hint="--backend")
     backends = [backend] if backend else list(BACKENDS)
     rows = []
 
     async def _collect():
+        images = await common_docker.container_images()
         for bk in backends:
             if bk == "vllm":
                 from tui.backends.vllm.backend_runtime import get_container_statuses
@@ -538,36 +629,59 @@ def ps(
             except RuntimeError as exc:
                 raise _StatusProbeFailed(f"{bk}: {exc}") from exc
             for s in statuses:
-                rows.append(
-                    {
-                        "backend": bk,
-                        "profile": s.profile_name,
-                        "container": s.container_name,
-                        "status": s.status_text,
-                        "running": s.running,
-                        "port": s.port,
-                        "gpu": s.gpu_id,
-                        "model": s.model,
-                    }
+                stored = profile_store.load_profile(s.profile_name, bk) or profile_store.StoredProfile(
+                    name=s.profile_name, backend=bk
                 )
+                row = {
+                    "backend": bk,
+                    "profile": s.profile_name,
+                    "container": s.container_name,
+                    "status": s.status_text,
+                    "running": s.running,
+                    "health": s.health or None,
+                    "ready": False,
+                    "served_models": [],
+                    "port": int(s.port) if s.port else None,
+                    "gpu": s.gpu_id,
+                    "image": images.get(s.container_name),
+                    "model": s.model if bk == "vllm" else (stored.hf_repo or stored.model_file or ""),
+                }
+                if bk == "llamacpp":
+                    row["hf_file"] = stored.hf_file or stored.model_file or ""
+                rows.append(row)
+        probes = await asyncio.gather(
+            *(
+                probe_served(row["backend"], row["profile"], row["port"])
+                if row["running"] and row["port"] else _not_running()
+                for row in rows
+            )
+        )
+        for row, (state, models, detail) in zip(rows, probes):
+            row["served_models"] = models
+            # null = the server answered but readiness could not be judged (see ready_error).
+            row["ready"] = None if state == "error" else state == "ready"
+            if state == "error":
+                row["ready_error"] = detail
 
     try:
         run_async(_collect())
-    except _StatusProbeFailed as exc:
+    except (_StatusProbeFailed, RuntimeError) as exc:
         typer.echo(f"container status probe failed — {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=UNREACHABLE) from exc
 
-    if running_only:
-        rows = [r for r in rows if r["running"]]
-
+    out = [row for row in rows if row["running"] or not running_only]
     if json_out:
-        emit_json(rows)
+        emit_json(out)
         return
 
     emit_table(
-        rows,
-        columns=["backend", "profile", "status", "port", "gpu", "container", "model"],
+        out,
+        columns=["backend", "profile", "status", "ready", "port", "gpu", "container", "model"],
     )
+
+
+async def _not_running() -> tuple[str, list[str], str]:
+    return "loading", [], ""
 
 
 
@@ -579,32 +693,47 @@ def render_env(
     backend: Optional[str] = typer.Option(
         None, "--backend", "-b", help="Limit when rendering all (no PROFILE given)."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Emit one JSON result record."),
 ) -> None:
     """Re-render `.runtime/<backend>/<profile>.env` from `profiles.yaml`."""
     if backend and backend not in BACKENDS:
         raise typer.BadParameter(f"unknown backend: {backend}", param_hint="--backend")
     if profile is None:
-        failures: list[str] = []
+        rendered: list[dict] = []
+        failed: list[dict] = []
         for bk in ([backend] if backend else list(BACKENDS)):
             for sp in profile_store.list_profiles(bk):
                 try:
-                    print(
-                        profile_store.render_env_for_profile(sp.name, sp.backend)
-                    )
+                    path = str(profile_store.render_env_for_profile(sp.name, sp.backend))
                 except ValueError as exc:
-                    failures.append(f"{bk}/{sp.name}: {exc}")
-        if failures:
-            print("\nFailed to render:")
-            for f in failures:
-                print(f"  - {f}")
-            raise typer.Exit(code=1)
-        return
+                    failed.append({"profile": sp.name, "backend": bk, "error": str(exc)})
+                    continue
+                rendered.append({"profile": sp.name, "backend": bk, "path": path})
+                if not json_out:
+                    print(path)
+        if failed:
+            typer.echo("Failed to render:", err=True)
+            for f in failed:
+                typer.echo(f"  - {f['backend']}/{f['profile']}: {f['error']}", err=True)
+        code = ERROR if failed else 0
+        if json_out:
+            record = {"ok": not failed, "code": code, "rendered": rendered, "failed": failed}
+            if failed:
+                record["error"] = "; ".join(f"{f['backend']}/{f['profile']}: {f['error']}" for f in failed)
+            emit_json(record)
+        raise typer.Exit(code=code)
 
     bk = detect_backend(profile, override=backend)
+    record = {"profile": profile, "backend": bk}
     try:
         out_path = profile_store.render_env_for_profile(profile, bk)
     except ValueError as exc:
-        print(f"Error: cannot render {bk}/{profile}.env — {exc}")
-        print(f"  Fix it with: llmux profile edit {profile} --unset <KEY>")
-        raise typer.Exit(code=1)
-    print(out_path)
+        fail(
+            f"Error: cannot render {bk}/{profile}.env — {exc}\n"
+            f"  Fix it with: llmux profile edit {profile} --unset <KEY>",
+            code=ERROR, json_out=json_out, record=record,
+        )
+    if json_out:
+        emit_json({**record, "ok": True, "code": 0, "path": str(out_path)})
+    else:
+        print(out_path)

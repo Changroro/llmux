@@ -263,6 +263,39 @@ async def image_present(image_ref: str) -> bool:
     raise RuntimeError(output.strip() or f"docker image inspect {image_ref} failed")
 
 
+async def secure_image(image_ref: str, pull_policy: str, *, stage: bool):
+    """Check — and with `stage`, pull — the image `compose up --pull <policy>` will need.
+
+    Ends with ("rc", n). Staging runs before `--replace` stops anything, so a
+    wrong name or failed pull never costs the running model.
+    """
+    from tui.common.exit_codes import ERROR, UNREACHABLE
+
+    try:
+        present = await image_present(image_ref)
+    except RuntimeError as exc:
+        yield ("log", f"Error: Docker image probe failed — {exc}")
+        yield ("rc", UNREACHABLE)
+        return
+    if pull_policy == "never" and not present:
+        yield ("log", f"Error: image {image_ref} is not available locally.")
+        yield ("rc", ERROR)
+        return
+    if stage and (pull_policy == "always" or not present):
+        rc = 1
+        async with aclosing(stream_pull(image_ref)) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    rc = int(event[1])
+                else:
+                    yield event
+        if rc != 0:
+            yield ("log", f"Error: could not pull {image_ref} (rc={rc}).")
+            yield ("rc", ERROR)
+            return
+    yield ("rc", 0)
+
+
 async def stream_pull(image_ref: str):
     """Pull `image_ref`, streaming docker's own progress output."""
     yield ("log", t(f"▸ Pulling image: {image_ref}", f"▸ 이미지 받는 중: {image_ref}"))
