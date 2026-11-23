@@ -15,6 +15,7 @@ from tui.backends.llamacpp.backend import (
     Profile,
     delete_profile,
     list_config_names,
+    parse_lora_modules,
     resolve_gguf_source,
     load_profile,
     save_profile,
@@ -205,6 +206,18 @@ class ProfileFormScreen(ModalScreen[str | None]):
                         id="image-tag-input",
                     )
 
+                with Horizontal(classes="form-row"):
+                    yield Label(t("Enable LoRA", "LoRA 사용"))
+                    yield Switch(value=p.enable_lora if p else False, id="lora-switch")
+
+                with Horizontal(classes="form-row"):
+                    yield Label("LoRA Modules")
+                    yield Input(
+                        value=p.lora_modules if p else "",
+                        placeholder="tone=org/adapter-GGUF/tone.gguf:0.5",
+                        id="lora-modules-input",
+                    )
+
                 yield Label(
                     t("Environment Variables (one KEY=VALUE per line)", "환경 변수 (한 줄에 KEY=VALUE 하나)"),
                     id="section-title",
@@ -225,6 +238,8 @@ class ProfileFormScreen(ModalScreen[str | None]):
         port = self.query_one("#port-input", Input).value.strip()
         gpu_id = self.query_one("#gpu-input", Input).value.strip()
         image_tag = self.query_one("#image-tag-input", Input).value.strip()
+        enable_lora = self.query_one("#lora-switch", Switch).value
+        lora_modules = self.query_one("#lora-modules-input", Input).value.strip()
         try:
             env_vars = profile_store.parse_env_vars_text(
                 self.query_one("#env-vars-input", TextArea).text,
@@ -302,6 +317,11 @@ class ProfileFormScreen(ModalScreen[str | None]):
                 return
             if gguf_warning:
                 self.notify(gguf_warning, severity="warning", timeout=8)
+        try:
+            parse_lora_modules(lora_modules)
+        except ValueError as exc:
+            self.notify(str(exc), severity="error", timeout=10)
+            return
         from tui.common.dev_build import image_tag_error
 
         tag_err = image_tag_error(image_tag)
@@ -321,6 +341,8 @@ class ProfileFormScreen(ModalScreen[str | None]):
             image_tag=image_tag,
             hf_repo=hf_repo,
             hf_file=hf_file,
+            enable_lora=enable_lora,
+            lora_modules=lora_modules,
             env_vars=env_vars,
         )
 

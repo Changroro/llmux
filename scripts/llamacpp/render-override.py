@@ -14,7 +14,9 @@ import yaml
 _CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_CHECKOUT_ROOT))
 from tui.common import profile_store  # noqa: E402
+from tui.backends.llamacpp.backend import lora_args  # noqa: E402
 from tui.common.config_markers import load_yaml_mapping  # noqa: E402
+from tui.common.prepare import hf_cache_path  # noqa: E402
 
 ROOT = profile_store.PROJECT_ROOT
 CONFIG_DIR = ROOT / "config" / "llamacpp"
@@ -50,6 +52,7 @@ def render_command(
     hf_repo: str = "",
     hf_file: str = "",
     known_flags: frozenset[str] | set[str] | None = None,
+    lora: list[tuple[str, str]] = (),
 ) -> list[str]:
     args: list[str] = [
         "--host", "0.0.0.0", "--port", "8080", "--no-webui", "--metrics",
@@ -131,6 +134,8 @@ def render_command(
         args.extend(["-ot", str(pattern)])
 
     args.extend(str(a) for a in extra_args)
+    for flag, value in lora:
+        args.extend([flag, value])
     return args
 
 
@@ -205,6 +210,7 @@ def main() -> int:
                 hf_repo=stored.hf_repo,
                 hf_file=stored.hf_file,
                 known_flags=_known_flags_from_env(),
+                lora=lora_args(stored, hf_cache_path()),
             )
         except ValueError as exc:
             print(f"config 렌더 실패: {exc}", file=sys.stderr)

@@ -236,6 +236,15 @@ def _require_linked_config_exists(backend: str, profile_name: str, config_name: 
         )
 
 
+def _check_llamacpp_lora(lora_modules: str) -> None:
+    from tui.backends.llamacpp.backend import parse_lora_modules
+
+    try:
+        parse_lora_modules(lora_modules)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--lora-modules") from None
+
+
 def _validate_image_tag(image_tag: str) -> None:
     from tui.common.dev_build import image_tag_error
 
@@ -329,7 +338,7 @@ def new_profile(
     container_name: str = typer.Option(
         "", "--container", help="Container name (defaults to profile name)."
     ),
-    enable_lora: bool = typer.Option(False, "--lora/--no-lora", help="vLLM only: enable LoRA."),
+    enable_lora: bool = typer.Option(False, "--lora/--no-lora", help="Enable static LoRA adapters (both backends)."),
     max_loras: int = typer.Option(
         0, "--max-loras", help="vLLM only: maximum simultaneously loaded LoRAs."
     ),
@@ -337,7 +346,7 @@ def new_profile(
         0, "--max-lora-rank", help="vLLM only: maximum supported LoRA rank."
     ),
     lora_modules: str = typer.Option(
-        "", "--lora-modules", help="vLLM only: comma-separated name=path adapters."
+        "", "--lora-modules", help="vLLM: comma-separated name=path adapters. llama.cpp: comma-separated [name=]org/repo/adapter.gguf[:scale] (downloaded in-container) or a container path."
     ),
     extra_pip: str = typer.Option(
         "", "--extra-pip", help="vLLM only: extra pip packages installed before serve."
@@ -372,10 +381,8 @@ def new_profile(
         vllm_only={
             "--model": bool(model),
             "--extra-pip": bool(extra_pip),
-            "--lora": enable_lora,
             "--max-loras": bool(max_loras),
             "--max-lora-rank": bool(max_lora_rank),
-            "--lora-modules": bool(lora_modules),
             "--tensor-parallel": bool(tensor_parallel),
         },
         llamacpp_only={
@@ -387,6 +394,7 @@ def new_profile(
         _validate_image_tag(image_tag)
     if backend == "llamacpp":
         hf_repo, hf_file = _require_gguf_source(hf_repo, hf_file)
+        _check_llamacpp_lora(lora_modules)
     # The container name becomes a docker object name — same lowercase rule the
     # TUI form enforces.
     if container_name:
@@ -455,7 +463,7 @@ def edit_profile(
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     config_name: Optional[str] = typer.Option(None, "--config", "-c"),
     container_name: Optional[str] = typer.Option(None, "--container"),
-    enable_lora: Optional[bool] = typer.Option(None, "--lora/--no-lora"),
+    enable_lora: Optional[bool] = typer.Option(None, "--lora/--no-lora", help="Enable static LoRA adapters (both backends)."),
     max_loras: Optional[int] = typer.Option(
         None, "--max-loras", help="vLLM only: positive integer; 0 clears it."
     ),
@@ -463,7 +471,7 @@ def edit_profile(
         None, "--max-lora-rank", help="vLLM only: positive integer; 0 clears it."
     ),
     lora_modules: Optional[str] = typer.Option(
-        None, "--lora-modules", help="vLLM only: comma-separated name=path adapters."
+        None, "--lora-modules", help="vLLM: comma-separated name=path adapters. llama.cpp: comma-separated [name=]org/repo/adapter.gguf[:scale] (downloaded in-container) or a container path."
     ),
     extra_pip: Optional[str] = typer.Option(None, "--extra-pip"),
     set_env: list[str] = typer.Option(
@@ -490,10 +498,8 @@ def edit_profile(
         vllm_only={
             "--model": model is not None,
             "--extra-pip": extra_pip is not None,
-            "--lora/--no-lora": enable_lora is not None,
             "--max-loras": max_loras is not None,
             "--max-lora-rank": max_lora_rank is not None,
-            "--lora-modules": lora_modules is not None,
             "--tensor-parallel": tensor_parallel is not None,
         },
         llamacpp_only={
@@ -504,6 +510,8 @@ def edit_profile(
     env_updates = _parse_set_kv(set_env, backend=bk)
     if image_tag:
         _validate_image_tag(image_tag)
+    if bk == "llamacpp" and lora_modules:
+        _check_llamacpp_lora(lora_modules)
     validated_source = None
     if hf_repo is not None or hf_file is not None:
         current = profile_store.load_profile(name, bk)

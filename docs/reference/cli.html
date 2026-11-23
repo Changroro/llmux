@@ -447,10 +447,10 @@ uv run llmux profile list -b vllm --json</code></pre>
         <tr><td><code>--model</code>, <code>-m</code></td><td><code>""</code></td><td>vLLM</td><td>Hugging Face model id.</td></tr>
         <tr><td><code>--config</code>, <code>-c</code></td><td><em>profile name</em></td><td>both</td><td>Linked config name.</td></tr>
         <tr><td><code>--container</code></td><td><em>profile name</em></td><td>both</td><td>Container name.</td></tr>
-        <tr><td><code>--lora / --no-lora</code></td><td><code>--no-lora</code></td><td>vLLM</td><td>Enable LoRA.</td></tr>
+        <tr><td><code>--lora / --no-lora</code></td><td><code>--no-lora</code></td><td>both</td><td>Enable LoRA (llama.cpp: the static adapters in <code>--lora-modules</code>).</td></tr>
         <tr><td><code>--max-loras</code></td><td><code>0</code></td><td>vLLM</td><td>Maximum simultaneously loaded LoRAs. <code>0</code> leaves the field unset.</td></tr>
         <tr><td><code>--max-lora-rank</code></td><td><code>0</code></td><td>vLLM</td><td>Maximum supported LoRA rank. <code>0</code> leaves the field unset.</td></tr>
-        <tr><td><code>--lora-modules</code></td><td><code>""</code></td><td>vLLM</td><td>Comma-separated <code>name=path</code> adapter mappings.</td></tr>
+        <tr><td><code>--lora-modules</code></td><td><code>""</code></td><td>both</td><td>vLLM: comma-separated <code>name=path</code> adapter mappings. llama.cpp: comma-separated <code>[name=]org/repo/adapter.gguf[:scale]</code> (downloaded into the HF cache by <code>prepare</code> / <code>up</code>) or a container path.</td></tr>
         <tr><td><code>--extra-pip</code></td><td><code>""</code></td><td>vLLM</td><td>Extra pip packages installed before serve. (First-class profile field — <strong>do not</strong> pass via <code>--set EXTRA_PIP_PACKAGES=…</code>.)</td></tr>
         <tr><td><code>--set</code></td><td><em>(none)</em></td><td>both</td><td>Repeatable: <code>KEY=VALUE</code> entries appended to <code>env_vars</code>. Key must be a valid env-var name and <strong>cannot</strong> shadow a reserved profile field or protected Hugging Face/Docker/Compose control key. Use the dedicated profile option instead.</td></tr>
         <tr><td><code>--image-tag</code></td><td><code>""</code></td><td>both</td><td>Docker image override (e.g. <code>llamacpp-dev:mtp_main</code>). Empty = backend default.</td></tr>
@@ -490,10 +490,10 @@ uv run llmux profile new gemma-q8 --backend llamacpp --hf-repo unsloth/gemma-3-4
         <tr><td><code>--model</code>, <code>-m</code></td><td>vLLM</td><td>New Hugging Face model id.</td></tr>
         <tr><td><code>--config</code>, <code>-c</code></td><td>both</td><td>New linked config name.</td></tr>
         <tr><td><code>--container</code></td><td>both</td><td>New container name.</td></tr>
-        <tr><td><code>--lora / --no-lora</code></td><td>vLLM</td><td>Toggle LoRA.</td></tr>
+        <tr><td><code>--lora / --no-lora</code></td><td>both</td><td>Toggle LoRA.</td></tr>
         <tr><td><code>--max-loras</code></td><td>vLLM</td><td>Set a positive simultaneous LoRA limit; pass <code>0</code> to clear it.</td></tr>
         <tr><td><code>--max-lora-rank</code></td><td>vLLM</td><td>Set a positive maximum LoRA rank; pass <code>0</code> to clear it.</td></tr>
-        <tr><td><code>--lora-modules</code></td><td>vLLM</td><td>Set comma-separated <code>name=path</code> adapters; pass an empty string to clear them.</td></tr>
+        <tr><td><code>--lora-modules</code></td><td>both</td><td>Set the adapters (format as in <code>profile new</code>); pass an empty string to clear them.</td></tr>
         <tr><td><code>--extra-pip</code></td><td>vLLM</td><td>Extra pip packages.</td></tr>
         <tr><td><code>--set</code></td><td>both</td><td>Repeatable: <code>KEY=VALUE</code> to add/override in <code>env_vars</code>. Protected Hugging Face/Docker/Compose control keys are rejected.</td></tr>
         <tr><td><code>--unset</code></td><td>both</td><td>Repeatable: <code>KEY</code> to remove from <code>env_vars</code>.</td></tr>

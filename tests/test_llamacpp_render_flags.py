@@ -50,7 +50,7 @@ class FalseBoolRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "cfg.yaml").write_text("jinja: false\n")
-            stored = SimpleNamespace(config_name="cfg", **SRC)
+            stored = SimpleNamespace(config_name="cfg", enable_lora=False, lora_modules="", **SRC)
             env = {R.FLAGS_ENV: json.dumps(["jinja", "no-jinja"])}
             with (
                 patch.object(R, "CONFIG_DIR", root),

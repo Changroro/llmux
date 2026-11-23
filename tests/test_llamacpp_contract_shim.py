@@ -257,6 +257,34 @@ async def test_replace_precheck_may_read_flags_from_the_image(llama_profile, mon
 
 
 @pytest.mark.asyncio
+async def test_dry_run_plans_an_uncached_lora(llama_profile, monkeypatch, tmp_path):
+    _dry_run_env(monkeypatch, tmp_path, enable_lora=True, lora_modules="org/lora/a.gguf")
+    download = AsyncMock(side_effect=AssertionError("plain dry-run downloads nothing"))
+    monkeypatch.setattr(rt, "_download_loras", download)
+    events = [e async for e in rt.stream_container_up("lp", dry_run=True)]
+    assert events[-1] == ("rc", 0)
+    assert any("would download LoRA org/lora/a.gguf" in data for kind, data in events if kind == "log")
+    args = next(data for kind, data in events if kind == "plan")["server_args"]
+    assert args[args.index("--lora") + 1].endswith("/a.gguf")
+
+
+@pytest.mark.asyncio
+async def test_replace_precheck_downloads_loras_first(llama_profile, monkeypatch, tmp_path):
+    _dry_run_env(monkeypatch, tmp_path, enable_lora=True, lora_modules="org/lora/a.gguf")
+    calls = []
+
+    async def failing_download(name, *_a, **_k):
+        calls.append(name)
+        yield ("log", "download failed")
+        yield ("rc", 1)
+
+    monkeypatch.setattr(rt, "_download_loras", failing_download)
+    events = [e async for e in rt.stream_container_up("lp", dry_run=True, stage_image=True)]
+    assert calls == ["lp"] and events[-1] == ("rc", 1)
+    assert not [e for e in events if e[0] == "plan"]
+
+
+@pytest.mark.asyncio
 async def test_dry_run_plan_hides_api_keys(llama_profile, monkeypatch, tmp_path):
     _dry_run_env(monkeypatch, tmp_path, config="api-key: sk-secret\nextra-args: [--hf-token=hf_abc, -hft, hf_def]\n")
     events = [e async for e in rt.stream_container_up("lp", dry_run=True)]

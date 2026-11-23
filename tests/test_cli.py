@@ -822,6 +822,24 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(offline.returncode, 1)
         self.assertEqual(json.loads(offline.stdout)["status"], "error")
 
+    def test_llamacpp_static_lora_flags(self):
+        r = _run_cli(
+            self.tmp, "profile", "new", "lora1", "--backend", "llamacpp", "--port", "8092",
+            "--hf-repo", "org/x", "--hf-file", "x.gguf",
+            "--lora", "--lora-modules", "tone=org/ad/tone.gguf:0.5",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
+        data = json.loads(_run_cli(self.tmp, "profile", "show", "lora1", "--json").stdout)
+        self.assertEqual((data["enable_lora"], data["lora_modules"]), (True, "tone=org/ad/tone.gguf:0.5"))
+        bad = _run_cli(self.tmp, "profile", "edit", "lora1", "--lora-modules", "org/ad.bin")
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("lora", bad.stderr.lower())
+        off = _run_cli(self.tmp, "profile", "edit", "lora1", "--no-lora")
+        self.assertEqual(off.returncode, 0, off.stderr)
+        vllm_only = _run_cli(self.tmp, "profile", "edit", "lora1", "--max-loras", "2")
+        self.assertEqual(vllm_only.returncode, 2)
+        _run_cli(self.tmp, "profile", "delete", "lora1", "-y")
+
     def test_llamacpp_model_file_option_is_gone(self):
         r = _run_cli(
             self.tmp, "profile", "new", "mf", "--backend", "llamacpp",
