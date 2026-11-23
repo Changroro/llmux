@@ -104,6 +104,17 @@ def required_image_reference_error(key: str, image_ref: str) -> str:
     return f"Error: invalid {key}: {error}" if error else ""
 
 
+def bind_host(common: dict[str, str]) -> str:
+    """The published-port address from `.env.common` — the only source compose may use."""
+    value = common.get("BIND_HOST", "").strip() or "127.0.0.1"
+    if value not in ("127.0.0.1", "0.0.0.0"):
+        raise ValueError(
+            "BIND_HOST must be 127.0.0.1 or 0.0.0.0 — llmux probes every "
+            f"server on 127.0.0.1. Current value: {value}"
+        )
+    return value
+
+
 def validate_common_env(
     common_env_path: Path,
     *,
@@ -146,6 +157,10 @@ def validate_common_env(
         return False, [
             f"Error: HF_CACHE_PATH must be an absolute path. Current value: {hf_cache_path}"
         ]
+    try:
+        bind_host(common)
+    except ValueError as exc:
+        return False, [f"Error: {exc}"]
     workers = common.get("PREPARE_MAX_WORKERS", "").strip()
     if workers and (not workers.isdigit() or int(workers) < 1):
         return False, [

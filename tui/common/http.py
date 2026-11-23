@@ -44,6 +44,31 @@ async def config_api_key(
     return key
 
 
+def _common_env_path():
+    from tui.common.profile_store import PROJECT_ROOT
+
+    return PROJECT_ROOT / ".env.common"
+
+
+async def exposure_warning(backend: str, name: str) -> str:
+    """Warn when BIND_HOST publishes the server beyond loopback without an API key."""
+    from tui.common.env import parse_env_file
+
+    path = _common_env_path()
+    bind_host = parse_env_file(path).get("BIND_HOST", "").strip() if path.exists() else ""
+    if bind_host in ("", "127.0.0.1"):
+        return ""
+    try:
+        if await profile_api_key(backend, name):
+            return ""
+    except (OSError, RuntimeError, ValueError):
+        return ""  # an unreadable api-key-file still means a key is configured
+    return (
+        f"Warning: BIND_HOST={bind_host} exposes {name} to the network without an API key "
+        "— set `api-key` in its config."
+    )
+
+
 async def profile_api_key(backend: str, name: str) -> str:
     from tui.common import profile_store
 

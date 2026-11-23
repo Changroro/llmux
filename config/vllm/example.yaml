@@ -7,7 +7,8 @@ model: your-org/your-model         # HuggingFace repo id 또는 로컬 경로 (�
 # ---- 메모리 / 병렬 ----
 gpu-memory-utilization: 0.90       # 0.0–1.0, GPU 당 vLLM 이 쓸 VRAM 비율
 max-model-len: 32768               # context 길이 (모델 기본보다 작게 잡으면 메모리 절감)
-# tensor-parallel-size: 2          # multi-GPU 시 (profile 의 GPU_ID 와 일치)
+# port / host / tensor-parallel-size 는 여기 쓰지 않는다 — llmux 가 프로필에서 정한다
+# (multi-GPU: `llmux profile edit <p> --gpu-id 0,1` 이면 TP 2, 다르게 하려면 --tensor-parallel N)
 
 # ---- 샘플링 기본값 (request 가 덮어씀) ----
 # dtype: bfloat16

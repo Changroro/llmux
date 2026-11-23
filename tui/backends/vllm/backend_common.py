@@ -28,6 +28,22 @@ VLLM_SRC_DIR = PROJECT_ROOT / ".vllm-src"
 DEFAULT_VLLM_REPO_URL = "https://github.com/vllm-project/vllm.git"
 
 
+# llmux owns these `vllm serve` flags: the container always listens on 0.0.0.0:8000
+# behind the profile port, and --tensor-parallel-size comes from the profile.
+RESERVED_CONFIG_KEYS = frozenset({"port", "host", "tensor-parallel-size"})
+
+
+def reserved_config_key_error(keys) -> str:
+    found = sorted({str(k) for k in keys if str(k).replace("_", "-") in RESERVED_CONFIG_KEYS})
+    if not found:
+        return ""
+    return (
+        f"{', '.join(found)} cannot be set in a vLLM config — llmux sets them from the "
+        "profile (port: `llmux profile edit <p> --port N`, tensor parallel: "
+        "`--tensor-parallel N`; host is fixed inside the container)"
+    )
+
+
 def validate_name(name: str) -> bool:
     """compose-safe lowercase name (docker compose project names are
     lowercase-only). Also prevents argv/path injection."""

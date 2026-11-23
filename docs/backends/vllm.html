@@ -76,15 +76,17 @@
     runtime: nvidia
     volumes:
       - ${HF_CACHE_PATH}:/root/.cache/huggingface
+      - ${VLLM_CACHE_PATH}:/root/.cache/vllm
       - ./config/vllm:/config/:ro
     ports:
-      - "127.0.0.1:${VLLM_PORT}:8000"
+      - "${BIND_HOST:-127.0.0.1}:${VLLM_PORT}:8000"
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
       - NVIDIA_VISIBLE_DEVICES=${GPU_ID}
-      - VLLM_ENABLE_V1_MULTIPROCESSING=0
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - VLLM_DISABLE_COMPILE_CACHE=1
+      - VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
+      - VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD:-spawn}
+      - VLLM_DISABLE_COMPILE_CACHE=${VLLM_DISABLE_COMPILE_CACHE:-0}
+      - VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-1}
     shm_size: "16g"
     command: --config /config/${CONFIG_NAME}.yaml --tensor-parallel-size=${TENSOR_PARALLEL_SIZE} ${LORA_OPTIONS:-}</code></pre>
     <p>Key points:</p>
@@ -92,7 +94,9 @@
       <li><strong><code>runtime: nvidia</code> + <code>NVIDIA_VISIBLE_DEVICES</code></strong> — the profile's <code>gpu_id</code> is passed straight through. A value of <code>"0,1"</code> exposes both GPUs to the container, which is what makes multi-GPU tensor parallelism work. llama.cpp uses the same passthrough mechanism and applies its own split policy.</li>
       <li><strong><code>${VLLM_IMAGE:-...}</code></strong> — a per-profile <code>image_tag</code> overrides the default. UI choices (Local Latest / Official / Nightly / Dev / Custom Tag) take precedence; if none is given, <code>VLLM_IMAGE</code> from the profile pin is used; otherwise the base falls back to <code>vllm/vllm-openai:${VLLM_VERSION}</code>.</li>
       <li><strong><code>--config /config/&lt;name&gt;.yaml</code></strong> — your <code>config/vllm/&lt;name&gt;.yaml</code> is mounted read-only into the container and passed to <code>vllm serve</code> as its config file. Every key in that YAML maps 1:1 to a <code>vllm serve</code> CLI flag.</li>
-      <li><strong><code>--tensor-parallel-size</code></strong> — injected from the profile, not the config.</li>
+      <li><strong><code>--tensor-parallel-size</code></strong> — injected from the profile, not the config. A config that sets <code>tensor-parallel-size</code>, <code>port</code> or <code>host</code> is rejected on save and on <code>up</code> (recipe imports drop them), because llmux owns those flags.</li>
+      <li><strong>Runtime env defaults</strong> — the four <code>VLLM_*</code> variables above default from <code>.env.common</code> and can be overridden per profile (<code>llmux profile edit &lt;p&gt; --set VLLM_DISABLE_COMPILE_CACHE=1</code>).</li>
+      <li><strong><code>/root/.cache/vllm</code></strong> — the torch.compile cache survives container restarts. <code>VLLM_CACHE_PATH</code> defaults to a <code>vllm/</code> directory next to <code>HF_CACHE_PATH</code>.</li>
       <li><strong><code>trust-remote-code</code></strong> — controlled by the profile config like any other vLLM flag; it can be enabled or explicitly disabled.</li>
       <li><strong><code>shm_size: "16g"</code></strong> — required headroom for vLLM's multiprocessing workers.</li>
     </ul>

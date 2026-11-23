@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from .backend_common import (
+    reserved_config_key_error,
     COMMON_ENV,
     COMPOSE_DIR,
     CONFIG_DIR,
@@ -48,7 +49,8 @@ from tui.common.conflicts import (
     local_port_in_use,
     published_tcp_host_ports,
 )
-from tui.common.env import validate_common_env
+from tui.common.env import bind_host, validate_common_env
+from tui.common.http import exposure_warning
 
 
 _BUILD_LOCK = asyncio.Lock()
@@ -62,6 +64,11 @@ _COMPOSE_PROFILE_ENV_KEYS = frozenset(
         "CONFIG_NAME",
         "EXTRA_PIP_PACKAGES",
         "VLLM_IMAGE",
+        # Profile env_vars may override these .env.common runtime defaults.
+        "VLLM_ENABLE_V1_MULTIPROCESSING",
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_DISABLE_COMPILE_CACHE",
+        "VLLM_USE_V2_MODEL_RUNNER",
     }
 )
 
@@ -122,6 +129,9 @@ def _validate_core_config_data(data: object) -> None:
         raise ValueError(
             "gpu-memory-utilization must be greater than 0 and at most 1"
         )
+    reserved = reserved_config_key_error(data)
+    if reserved:
+        raise ValueError(reserved)
 
 
 def _validate_core_config_file(path: os.PathLike[str] | str) -> None:
@@ -247,7 +257,13 @@ def _compose_env(
     vllm_image: str = "",
 ) -> dict[str, str]:
     env = os.environ.copy()
-    env.update(_common_env(expand=True))
+    common = _common_env(expand=True)
+    env.update(common)
+    # Shell and profile .env values must not reach the port binding unvalidated.
+    env["BIND_HOST"] = bind_host(common)
+    if env.get("HF_CACHE_PATH") and not env.get("VLLM_CACHE_PATH"):
+        hf_cache = os.path.normpath(env["HF_CACHE_PATH"])
+        env["VLLM_CACHE_PATH"] = os.path.join(os.path.dirname(hf_cache), "vllm")
     profile_env = _parse_env_file(profile.path)
     env.update(
         {key: profile_env[key] for key in _COMPOSE_PROFILE_ENV_KEYS if key in profile_env}
@@ -506,8 +522,9 @@ async def check_port_conflict(profile: Profile) -> str | None:
                     return f"profile '{name}'"
             return f"container '{container_name}'"
 
-    if local_port_in_use(int(profile.port), "127.0.0.1"):
-        return f"another local process on 127.0.0.1:{profile.port}"
+    host = bind_host(_common_env())
+    if local_port_in_use(int(profile.port), host):
+        return f"another local process on {host}:{profile.port}"
     return None
 
 
@@ -540,6 +557,42 @@ async def _models_endpoint_ready(port: str, timeout: int = 3, *, api_key: str = 
             return False
 
     return await loop.run_in_executor(None, _probe)
+
+
+def _is_hub_id(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and not value.strip().startswith(("/", "~", "."))
+
+
+def _model_cache_dir(hf_cache_path: str, model: str) -> str | None:
+    """Host HF-cache directory of one hub model (None for local paths)."""
+    if not hf_cache_path or not _is_hub_id(model):
+        return None
+    return os.path.join(hf_cache_path, "hub", "models--" + model.strip().replace("/", "--"))
+
+
+def _prepare_repos(config: Config) -> list[tuple[str, str, str]]:
+    """(label, hub repo, revision) for every repo `vllm serve` would fetch."""
+    params = {key.replace("_", "-"): value for key, value in config.extra_params.items()}
+    spec = params.get("speculative-config") or {}
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except json.JSONDecodeError:
+            spec = {}
+    candidates = [
+        ("model", config.model, params.get("revision") or ""),
+        ("tokenizer", params.get("tokenizer"), params.get("tokenizer-revision") or ""),
+        ("draft model", spec.get("model") if isinstance(spec, dict) else None, ""),
+    ]
+    # One download per (repo, revision); a weights download covers a tokenizer-only one.
+    repos: dict[tuple[str, str], str] = {}
+    for label, repo, revision in candidates:
+        if not _is_hub_id(repo):
+            continue
+        key = (repo.strip(), str(revision))
+        if key not in repos or repos[key] == "tokenizer":
+            repos[key] = repos.get(key, label) if label == "tokenizer" else label
+    return [(label, repo, revision) for (repo, revision), label in repos.items()]
 
 
 async def _dir_size_bytes(path: str | None) -> int | None:
@@ -660,12 +713,14 @@ async def _post_start_validation(
         try:
             cache_size = await _dir_size_bytes(hf_cache_path)
         except RuntimeError as exc:
-            yield (
-                "result",
-                False,
-                [f"Error: startup progress probe failed: {exc}"],
-            )
-            return
+            cache_size = None
+            if hf_cache_path and os.path.exists(hf_cache_path):
+                yield (
+                    "log",
+                    f"Warning: startup progress probe (du) failed — {exc}; "
+                    "continuing without download tracking",
+                )
+                hf_cache_path = None
         if (
             last_cache_size is not None
             and cache_size is not None
@@ -881,6 +936,9 @@ async def stream_container_up(
         return
     for message in gpu_conflicts:
         yield ("log", message)
+    exposure = await exposure_warning("vllm", profile.name)
+    if exposure:
+        yield ("log", exposure)
 
     if extra_packages:
         yield ("log", "Extra pip packages are configured.")
@@ -950,8 +1008,8 @@ async def stream_container_up(
     elif not tag and profile.image_tag:
         # Per-profile pinned image. UI overrides (Dev Build / explicit Custom
         # Tag) take precedence and are handled above; absent those, honor the
-        # profile's image_tag over the version-tag default. version_tag stays
-        # empty so the shared block below skips version verification.
+        # profile's image_tag over the version-tag default. version_tag is the
+        # pin's tag, so a semver pin is still version-verified after start.
         version_tag = profile.image_tag.rsplit(":", 1)[-1]
         # Mirror llama.cpp: a pinned dev image (vllm-dev:<tag>) that hasn't been
         # built yet would fail compose with an opaque "image not found" error.
@@ -1113,12 +1171,15 @@ async def stream_container_up(
             outcome = "error"
             crashed_id = ""
             val_messages: list[str] = []
+            progress_path = _model_cache_dir(
+                env.get("HF_CACHE_PATH", ""), load_config(profile.config_name or profile.name).model
+            )
             async with aclosing(
                 _post_start_validation(
                     profile,
                     timeout=stall_timeout,
                     max_wait=ready_timeout,
-                    hf_cache_path=env.get('HF_CACHE_PATH') or None,
+                    hf_cache_path=progress_path,
                 )
             ) as _owned_stream:
                 async for ev in _owned_stream:
@@ -1274,7 +1335,8 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
                     yield event
     yield ("log", f"▸ Image: {image_ref}")
 
-    if model.startswith("/") or model.startswith("~"):
+    repos = _prepare_repos(config)
+    if not repos:
         yield ("log", f"▸ Model is a container path ({model}) — nothing to download.")
         yield ("log", f"✓ {profile_name} prepared. Start it with: llmux up {profile_name}")
         yield ("rc", 0)
@@ -1287,18 +1349,20 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         yield ("rc", 1)
         return
 
-    yield ("log", f"▸ Downloading {model} into {cache_path}")
-    rc = -1
-    async with aclosing(prepare.stream_vllm_download(image_ref=image_ref, model_id=model, revision=config.extra_params.get('revision') or '', cache_path=cache_path, token=prepare.hf_token(), container_name=prepare.prepare_container_name(profile.container_name), max_workers=max_workers)) as _owned_stream:
-        async for event in _owned_stream:
-            if event[0] == "rc":
-                rc = int(event[1])
-            else:
-                yield event
-    if rc != 0:
-        yield ("log", f"✗ Download failed (rc={rc}).")
-        yield ("rc", rc if rc != 0 else 1)
-        return
+    for label, repo, revision in repos:
+        yield ("log", f"▸ Downloading {label} {repo} into {cache_path}")
+        rc = -1
+        ignore = prepare.TOKENIZER_IGNORE_PATTERNS if label == "tokenizer" else None
+        async with aclosing(prepare.stream_vllm_download(image_ref=image_ref, model_id=repo, revision=revision, cache_path=cache_path, token=prepare.hf_token(), container_name=prepare.prepare_container_name(profile.container_name), max_workers=max_workers, ignore_patterns=ignore)) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    rc = int(event[1])
+                else:
+                    yield event
+        if rc != 0:
+            yield ("log", f"✗ Download of {label} {repo} failed (rc={rc}).")
+            yield ("rc", rc if rc > 0 else 1)
+            return
 
     yield ("log", f"✓ {profile_name} prepared. Start it with: llmux up {profile_name}")
     yield ("rc", 0)

@@ -88,6 +88,9 @@ _PROTECTED_ENV_KEYS = frozenset(
     {
         "HF_TOKEN",
         "HF_ENDPOINT",
+        # Host-level: published bind address and the compile-cache mount.
+        "BIND_HOST",
+        "VLLM_CACHE_PATH",
     }
 )
 _PROTECTED_ENV_PREFIXES = (

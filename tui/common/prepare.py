@@ -37,6 +37,8 @@ _PROGRESS_INTERVAL = 1.0
 # `original/` holds the Meta-format checkpoint of Llama-style repos — vLLM loads
 # the HF-format weights next to it, so pulling both doubles the download.
 _VLLM_IGNORE_PATTERNS = ["original/**"]
+# A tokenizer-only fetch (config `tokenizer:` pointing at another repo) skips weights.
+TOKENIZER_IGNORE_PATTERNS = [*_VLLM_IGNORE_PATTERNS, "*.safetensors", "*.bin", "*.pt", "*.pth", "*.gguf"]
 
 # HF caps a single connection at a few MB/s, so the worker count is really a
 # bandwidth dial — see PREPARE_MAX_WORKERS in .env.common.
@@ -313,6 +315,7 @@ async def stream_vllm_download(
     container_name: str,
     max_workers: int | None = None,
     revision: str = "",
+    ignore_patterns: list[str] | None = None,
 ):
     """Download a HF snapshot with the image's own huggingface_hub."""
     cleanup_rc, cleanup_error = await _remove_prepare_container(container_name)
@@ -325,7 +328,7 @@ async def stream_vllm_download(
         "--name", container_name,
         "-v", f"{cache_path}:/root/.cache/huggingface",
         "-e", f"LLMUX_PREPARE_MODEL={model_id}",
-        "-e", f"LLMUX_PREPARE_IGNORE={','.join(_VLLM_IGNORE_PATTERNS)}",
+        "-e", f"LLMUX_PREPARE_IGNORE={','.join(ignore_patterns or _VLLM_IGNORE_PATTERNS)}",
     ] + workers_env(max_workers)
     if revision:
         args += ["-e", f"LLMUX_PREPARE_REVISION={revision}"]

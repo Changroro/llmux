@@ -107,7 +107,7 @@ class VllmComposeSecurityTests(unittest.TestCase):
         service = yaml.safe_load(compose_path.read_text())["services"]["vllm"]
         self.assertTrue(any(volume.endswith(":/config/:ro") for volume in service["volumes"]))
 
-    def test_backend_ports_bind_only_to_loopback(self) -> None:
+    def test_backend_ports_default_to_loopback(self) -> None:
         root = Path(__file__).resolve().parents[1] / "compose"
         cases = (
             (root / "vllm" / "docker-compose.yaml", "vllm"),
@@ -116,7 +116,10 @@ class VllmComposeSecurityTests(unittest.TestCase):
         for compose_path, service_name in cases:
             with self.subTest(service=service_name):
                 service = yaml.safe_load(compose_path.read_text())["services"][service_name]
-                self.assertTrue(all(port.startswith("127.0.0.1:") for port in service["ports"]))
+                # Opt-in exposure goes through BIND_HOST, validated to 127.0.0.1/0.0.0.0.
+                self.assertTrue(
+                    all(port.startswith("${BIND_HOST:-127.0.0.1}:") for port in service["ports"])
+                )
 
 
 @pytest.mark.usefixtures("isolated_vllm_storage")

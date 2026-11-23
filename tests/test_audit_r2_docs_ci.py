@@ -45,7 +45,7 @@ def test_ci_negative_matrix_covers_every_required_compose_interpolation() -> Non
         re.findall(r"^\s+expect_missing\s+(\S+)\s+([A-Z0-9_]+)\s+", workflow, re.MULTILINE)
     )
 
-    assert sum(required.values()) == 16
+    assert sum(required.values()) == 17
     assert covered == required
     assert 'echo "compose accepted missing required $label" >&2' in workflow
     assert 'echo "compose rejected missing required $label"' in workflow

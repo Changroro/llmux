@@ -22,7 +22,7 @@ from tui.common.conflicts import (
 from tui.common.docker import (
     run_command as _docker_run,
 )
-from tui.common.env import validate_common_env
+from tui.common.env import bind_host, validate_common_env
 
 from .backend import (
     COMMON_ENV,
@@ -222,8 +222,10 @@ def _compose_files(profile: Profile) -> list[str]:
 
 def _compose_env(profile: Profile) -> dict[str, str]:
     env = os.environ.copy()
-    if COMMON_ENV.exists():
-        env.update(_parse_env_file(COMMON_ENV, expand=True))
+    common = _parse_env_file(COMMON_ENV, expand=True) if COMMON_ENV.exists() else {}
+    env.update(common)
+    # Shell and profile .env values must not reach the port binding unvalidated.
+    env["BIND_HOST"] = bind_host(common)
     if profile.path.exists():
         profile_env = _parse_env_file(profile.path)
         env.update(

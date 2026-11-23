@@ -39,6 +39,7 @@ class VllmDevComposeAuditTests(unittest.TestCase):
             "HF_CACHE_PATH",
             "PROFILE_PATH",
             "TENSOR_PARALLEL_SIZE",
+            "VLLM_CACHE_PATH",
             "VLLM_DEV_TAG",
             "VLLM_PORT",
         ):
@@ -51,6 +52,7 @@ class VllmDevComposeAuditTests(unittest.TestCase):
                 "HF_CACHE_PATH": "/tmp/llmux-audit-cache",
                 "PROFILE_PATH": str(profile_path),
                 "TENSOR_PARALLEL_SIZE": "1",
+                "VLLM_CACHE_PATH": "/tmp/llmux-audit-vllm-cache",
                 "VLLM_DEV_TAG": "audit",
                 "VLLM_PORT": "18000",
             }

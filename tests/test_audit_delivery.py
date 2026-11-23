@@ -470,7 +470,7 @@ def test_docs_and_ci_publish_current_delivery_contracts() -> None:
     assert "export CONTAINER_NAME=test CONFIG_NAME=test" in ci
     assert 'python-version: ["3.10", "3.13"]' in ci
     assert 'env -u "$variable" docker compose' in ci
-    assert len(re.findall(r"^\s+expect_missing ", ci, re.MULTILINE)) == 16
+    assert len(re.findall(r"^\s+expect_missing ", ci, re.MULTILINE)) == 17
     for variable in (
         "CONTAINER_NAME",
         "LLAMA_PORT",
@@ -482,6 +482,7 @@ def test_docs_and_ci_publish_current_delivery_contracts() -> None:
         "GPU_ID",
         "PROFILE_PATH",
         "TENSOR_PARALLEL_SIZE",
+        "VLLM_CACHE_PATH",
         "LORA_BASE_PATH",
     ):
         assert re.search(

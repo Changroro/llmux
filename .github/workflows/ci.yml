@@ -49,7 +49,7 @@ jobs:
 
           export CONTAINER_NAME=test CONFIG_NAME=test HF_CACHE_PATH=/tmp/cache HF_TOKEN=
           export LLAMA_PORT=8080 LLAMACPP_DEV_TAG=test
-          export VLLM_PORT=8000 VLLM_DEV_TAG=test TENSOR_PARALLEL_SIZE=1
+          export VLLM_PORT=8000 VLLM_DEV_TAG=test TENSOR_PARALLEL_SIZE=1 VLLM_CACHE_PATH=/tmp/vllm-cache
           export GPU_ID=0 LORA_BASE_PATH=/tmp/lora
           export PROFILE_PATH="$RUNNER_TEMP/llmux-profile.env"
           install -m 600 /dev/null "$PROFILE_PATH"
@@ -84,6 +84,7 @@ jobs:
           expect_missing compose/vllm/docker-compose.yaml:GPU_ID GPU_ID -f compose/vllm/docker-compose.yaml
           expect_missing compose/vllm/docker-compose.yaml:CONFIG_NAME CONFIG_NAME -f compose/vllm/docker-compose.yaml
           expect_missing compose/vllm/docker-compose.yaml:TENSOR_PARALLEL_SIZE TENSOR_PARALLEL_SIZE -f compose/vllm/docker-compose.yaml
+          expect_missing compose/vllm/docker-compose.yaml:VLLM_CACHE_PATH VLLM_CACHE_PATH -f compose/vllm/docker-compose.yaml
           expect_missing compose/vllm/docker-compose.overrides.yaml:PROFILE_PATH PROFILE_PATH -f compose/vllm/docker-compose.yaml -f compose/vllm/docker-compose.overrides.yaml
           expect_missing compose/vllm/docker-compose.dev.yaml:VLLM_DEV_TAG VLLM_DEV_TAG -f compose/vllm/docker-compose.yaml -f compose/vllm/docker-compose.dev.yaml
           expect_missing compose/vllm/docker-compose.lora.yaml:LORA_BASE_PATH LORA_BASE_PATH -f compose/vllm/docker-compose.yaml -f compose/vllm/docker-compose.lora.yaml

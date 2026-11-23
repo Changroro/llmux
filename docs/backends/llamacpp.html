@@ -74,7 +74,7 @@
     image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
     container_name: ${CONTAINER_NAME}
     ports:
-      - "127.0.0.1:${LLAMA_PORT:-8080}:8080"
+      - "${BIND_HOST:-127.0.0.1}:${LLAMA_PORT:-8080}:8080"
     volumes:
       - ${HF_CACHE_PATH}:/root/.cache/huggingface
     runtime: nvidia

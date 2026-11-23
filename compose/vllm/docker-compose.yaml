@@ -5,16 +5,17 @@ services:
     runtime: nvidia
     volumes:
       - ${HF_CACHE_PATH:?HF_CACHE_PATH is required in .env.common}:/root/.cache/huggingface
+      - ${VLLM_CACHE_PATH:?VLLM_CACHE_PATH is required — llmux derives it from HF_CACHE_PATH}:/root/.cache/vllm
       - ./config/vllm:/config/:ro
     ports:
-      - "127.0.0.1:${VLLM_PORT:?VLLM_PORT is required — the profile env was not rendered}:8000"
+      - "${BIND_HOST:-127.0.0.1}:${VLLM_PORT:?VLLM_PORT is required — the profile env was not rendered}:8000"
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
       - TZ=${TZ:-UTC}
       - NVIDIA_VISIBLE_DEVICES=${GPU_ID:?GPU_ID is required — the profile env was not rendered}
-      - VLLM_ENABLE_V1_MULTIPROCESSING=0
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - VLLM_DISABLE_COMPILE_CACHE=1
+      - VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
+      - VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD:-spawn}
+      - VLLM_DISABLE_COMPILE_CACHE=${VLLM_DISABLE_COMPILE_CACHE:-0}
       - VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-1}
     shm_size: "16g"
     command: --config /config/${CONFIG_NAME:?CONFIG_NAME is required — the profile env was not rendered}.yaml --tensor-parallel-size=${TENSOR_PARALLEL_SIZE:?TENSOR_PARALLEL_SIZE is required — the profile env was not rendered} ${LORA_OPTIONS:-}
