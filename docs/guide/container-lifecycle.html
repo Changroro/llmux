@@ -169,7 +169,7 @@ llmux ps --json             # machine-readable output</code></pre>
 
     <div class="admonition note">
       <p class="admonition-title">Local API binding</p>
-      <p>Both backend ports bind to <code>127.0.0.1</code>. The OpenAI-compatible API is available to clients on the same host without exposing an unauthenticated inference endpoint on every network interface.</p>
+      <p>Both backend ports bind to <code>127.0.0.1</code> by default. The OpenAI-compatible API is available to clients on the same host without exposing an unauthenticated inference endpoint on every network interface. Set <code>BIND_HOST=0.0.0.0</code> in <code>.env.common</code> to publish on every interface; <code>up</code> warns when a profile is published that way without an <code>api-key</code>. Other addresses are rejected because llmux always probes the server on <code>127.0.0.1</code>.</p>
     </div>
 
     <h3 id="render-env-regenerate-runtime-env-files"><code>render-env</code> — regenerate runtime env files</h3>

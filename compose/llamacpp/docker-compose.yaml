@@ -5,7 +5,7 @@ services:
     runtime: nvidia
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${LLAMA_PORT:?LLAMA_PORT is required — the profile env was not rendered}:8080"
+      - "${BIND_HOST:-127.0.0.1}:${LLAMA_PORT:?LLAMA_PORT is required — the profile env was not rendered}:8080"
     volumes:
       - ${HF_CACHE_PATH:?HF_CACHE_PATH is required — .env.common was not loaded}:/root/.cache/huggingface
     environment:

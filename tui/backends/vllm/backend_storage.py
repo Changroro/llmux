@@ -15,7 +15,7 @@ from tui.common.config_markers import (
 )
 from tui.common.env import parse_env_file as _parse_env_file  # noqa: F401 — re-exported for callers
 
-from .backend_common import CONFIG_DIR, Config, Profile
+from .backend_common import CONFIG_DIR, Config, Profile, reserved_config_key_error
 
 
 def _to_profile(stored: profile_store.StoredProfile) -> Profile:
@@ -169,6 +169,9 @@ def save_config(config: Config, *, template: str | None = None) -> None:
         raise ValueError(
             "gpu-memory-utilization must be greater than 0 and at most 1"
         )
+    reserved = reserved_config_key_error(config.extra_params)
+    if reserved:
+        raise ValueError(reserved)
     with profile_store.storage_transaction():
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         existing = config.path.read_text() if config.path.exists() else None

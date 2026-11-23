@@ -230,7 +230,12 @@ def build_config(
     for f in recipe.features:
         if f.name in enabled:
             args += f.args
-    params = args_to_config(args)
+    from tui.backends.vllm.backend_common import RESERVED_CONFIG_KEYS
+
+    params = {
+        key: value for key, value in args_to_config(args).items()
+        if key.replace("_", "-") not in RESERVED_CONFIG_KEYS
+    }
     if recipe.context_length and "max-model-len" not in params:
         params["max-model-len"] = recipe.context_length
     return model_id, params

@@ -255,6 +255,7 @@ uv run llmux up gemma-3-4b --dev \
         <tr><td><code>--json</code></td><td><code>False</code></td><td>Log on stderr; one result record on stdout.</td></tr>
       </tbody>
     </table>
+    <p>For vLLM, <code>prepare</code> also fetches the other repos the config names: a separate <code>tokenizer</code> repo (tokenizer files only) and the draft model in <code>speculative-config</code>. MTP-style speculative configs need no extra download.</p>
     <pre data-lang="bash"><code>uv run llmux prepare qwen3-0-6b
 uv run llmux prepare gemma-3-4b --backend llamacpp</code></pre>
     <div class="admonition note">

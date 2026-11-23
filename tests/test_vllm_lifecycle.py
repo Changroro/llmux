@@ -179,6 +179,206 @@ async def test_validation_reports_crash_and_stall_outcomes():
 
 
 @pytest.mark.asyncio
+async def test_du_failure_warns_and_keeps_waiting(tmp_path):
+    profile = _profile()
+    calls = {"ready": 0}
+
+    async def run(*args, **_kwargs):
+        if args[0] == "du":
+            return 124, "timed out"
+        if args[:2] == ("docker", "inspect"):
+            return 0, "running\tstarting"
+        return 0, f"log {calls['ready']}\n"
+
+    async def ready(*_a, **_k):
+        calls["ready"] += 1
+        return calls["ready"] > 3
+
+    with patch.object(rt, "run_command", side_effect=run), patch.object(
+        rt, "_models_endpoint_ready", side_effect=ready
+    ), patch.object(rt, "load_config", return_value=rt.Config(name="p", model="m")):
+        events = [
+            e
+            async for e in rt._post_start_validation(
+                profile, timeout=5, poll_interval=0.01, hf_cache_path=str(tmp_path)
+            )
+        ]
+    assert events[-1] == ("result", True, [])
+    warnings = [e[1] for e in events if e[0] == "log" and "du" in e[1]]
+    assert len(warnings) == 1 and warnings[0].startswith("Warning")
+
+
+def test_model_cache_dir_targets_one_model(tmp_path):
+    assert rt._model_cache_dir(str(tmp_path), "Qwen/Qwen3-8B") == str(
+        tmp_path / "hub" / "models--Qwen--Qwen3-8B"
+    )
+    assert rt._model_cache_dir(str(tmp_path), "/models/local") is None
+    assert rt._model_cache_dir("", "Qwen/Qwen3-8B") is None
+
+
+_TUNABLE = (
+    "VLLM_ENABLE_V1_MULTIPROCESSING",
+    "VLLM_WORKER_MULTIPROC_METHOD",
+    "VLLM_DISABLE_COMPILE_CACHE",
+    "VLLM_USE_V2_MODEL_RUNNER",
+)
+
+
+def test_profile_env_vars_override_vllm_runtime_defaults(tmp_path, monkeypatch):
+    common = tmp_path / ".env.common"
+    common.write_text("VLLM_DISABLE_COMPILE_CACHE=1\nVLLM_USE_V2_MODEL_RUNNER=1\n")
+    profile_env = tmp_path / "p.env"
+    profile_env.write_text("CONTAINER_NAME=p\nVLLM_DISABLE_COMPILE_CACHE=0\nVLLM_ENABLE_V1_MULTIPROCESSING=1\n")
+    monkeypatch.setattr(rt, "COMMON_ENV", common)
+    profile = rt.Profile(name="p")
+    monkeypatch.setattr(type(profile), "path", property(lambda self: profile_env))
+    env = rt._compose_env(profile, use_dev=False, version_tag="v1")
+    assert env["VLLM_DISABLE_COMPILE_CACHE"] == "0"
+    assert env["VLLM_ENABLE_V1_MULTIPROCESSING"] == "1"
+    assert env["VLLM_USE_V2_MODEL_RUNNER"] == "1"
+
+
+def test_compose_reads_tunable_env_from_interpolation_not_literals():
+    from pathlib import Path
+
+    compose = (Path(rt.COMPOSE_DIR) / "docker-compose.yaml").read_text()
+    for key in _TUNABLE:
+        assert f"{key}=${{{key}:-" in compose, key
+    assert "/root/.cache/vllm" in compose
+    assert "${BIND_HOST:-127.0.0.1}:" in compose
+
+
+def test_bind_host_must_cover_loopback(tmp_path):
+    from tui.common.env import validate_common_env
+
+    common = tmp_path / ".env.common"
+    for value, ok in (("", True), ("127.0.0.1", True), ("0.0.0.0", True), ("192.168.0.5", False)):
+        common.write_text(f"HF_CACHE_PATH={tmp_path}\nBIND_HOST={value}\n")
+        common.chmod(0o600)
+        assert validate_common_env(common)[0] is ok, value
+
+
+@pytest.mark.asyncio
+async def test_exposure_warning_only_for_open_bind_without_key(tmp_path, monkeypatch):
+    from tui.common import http
+
+    common = tmp_path / ".env.common"
+    monkeypatch.setattr(http, "_common_env_path", lambda: common)
+    monkeypatch.setattr(http, "profile_api_key", AsyncMock(return_value=""))
+    common.write_text("BIND_HOST=0.0.0.0\n")
+    assert (await http.exposure_warning("vllm", "p")).startswith("Warning")
+    http.profile_api_key.return_value = "k"
+    assert await http.exposure_warning("vllm", "p") == ""
+    common.write_text("BIND_HOST=127.0.0.1\n")
+    http.profile_api_key.return_value = ""
+    assert await http.exposure_warning("vllm", "p") == ""
+
+
+def test_compile_cache_defaults_next_to_hf_cache(tmp_path, monkeypatch):
+    common = tmp_path / ".env.common"
+    common.write_text("HF_CACHE_PATH=/data/hf/\n")
+    monkeypatch.setattr(rt, "COMMON_ENV", common)
+    profile = rt.Profile(name="p")
+    monkeypatch.setattr(type(profile), "path", property(lambda self: tmp_path / "missing.env"))
+    assert rt._compose_env(profile, use_dev=False)["VLLM_CACHE_PATH"] == "/data/vllm"
+    common.write_text("HF_CACHE_PATH=/data/hf\nVLLM_CACHE_PATH=/fast/vllm\n")
+    assert rt._compose_env(profile, use_dev=False)["VLLM_CACHE_PATH"] == "/fast/vllm"
+
+
+@pytest.mark.parametrize("key", ["port", "host", "tensor-parallel-size", "tensor_parallel_size"])
+def test_reserved_config_keys_are_rejected_on_save_and_up(key, tmp_path, monkeypatch):
+    from tui.backends.vllm import backend_storage
+
+    monkeypatch.setattr(backend_storage, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(rt.Config, "path", property(lambda self: tmp_path / f"{self.name}.yaml"))
+    config = rt.Config(name="c", model="org/m", extra_params={key: 2})
+    with pytest.raises(ValueError, match="profile"):
+        backend_storage.save_config(config)
+    assert not (tmp_path / "c.yaml").exists()
+    with pytest.raises(ValueError, match="profile"):
+        rt._validate_core_config_data({"model": "org/m", key: 2})
+
+
+def test_disabled_reserved_key_is_allowed(tmp_path, monkeypatch):
+    from tui.backends.vllm import backend_storage
+
+    monkeypatch.setattr(backend_storage, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(rt.Config, "path", property(lambda self: tmp_path / f"{self.name}.yaml"))
+    backend_storage.save_config(rt.Config(name="c", model="org/m", disabled_params={"port": 9000}))
+    assert (tmp_path / "c.yaml").exists()
+
+
+def test_recipe_import_drops_reserved_keys():
+    from tui.common.recipes import Recipe, build_config
+
+    recipe = Recipe(
+        model_id="org/m",
+        base_args=["--tensor-parallel-size", "8", "--port", "9000", "--max-num-seqs", "64"],
+    )
+    _model, params = build_config(recipe, None, [])
+    assert params == {"max-num-seqs": 64}
+
+
+def test_prepare_lists_draft_and_tokenizer_repos():
+    config = rt.Config(
+        name="c",
+        model="org/main",
+        extra_params={
+            "revision": "r1",
+            "tokenizer": "org/tok",
+            "tokenizer-revision": "t1",
+            "speculative-config": '{"method": "eagle3", "model": "org/draft", "num_speculative_tokens": 3}',
+        },
+    )
+    assert rt._prepare_repos(config) == [
+        ("model", "org/main", "r1"),
+        ("tokenizer", "org/tok", "t1"),
+        ("draft model", "org/draft", ""),
+    ]
+
+
+def test_prepare_skips_local_paths_mtp_and_duplicates():
+    config = rt.Config(
+        name="c",
+        model="org/main",
+        extra_params={
+            "tokenizer": "org/main",
+            "speculative_config": {"method": "mtp", "num_speculative_tokens": 1},
+        },
+    )
+    assert rt._prepare_repos(config) == [("model", "org/main", "")]
+    local = rt.Config(name="c", model="/models/x", extra_params={"tokenizer": "./tok"})
+    assert rt._prepare_repos(local) == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_downloads_every_repo_and_skips_tokenizer_weights(monkeypatch, tmp_path):
+    from tui.common import prepare
+
+    config = rt.Config(name="p", model="org/main", extra_params={"tokenizer": "org/tok"})
+    calls: list = []
+
+    async def download(**kwargs):
+        calls.append((kwargs["model_id"], kwargs.get("ignore_patterns")))
+        yield ("rc", 0)
+
+    profile = _profile()
+    monkeypatch.setattr(rt.profile_store, "load_profile", lambda *_a: object())
+    monkeypatch.setattr(rt, "load_profile", lambda _n: profile)
+    monkeypatch.setattr(rt, "_ensure_common_env", lambda _p: (True, []))
+    monkeypatch.setattr(rt, "_ensure_profile_config", lambda _p: (True, []))
+    monkeypatch.setattr(rt, "_render_profile_snapshot", lambda _n: (profile, "/x"))
+    monkeypatch.setattr(rt, "load_config", lambda _n: config)
+    monkeypatch.setattr(prepare, "image_present", AsyncMock(return_value=True))
+    monkeypatch.setattr(prepare, "hf_cache_path", lambda: str(tmp_path))
+    monkeypatch.setattr(prepare, "stream_vllm_download", download)
+    events = [e async for e in rt.stream_container_prepare("p")]
+    assert events[-1] == ("rc", 0)
+    assert calls[0] == ("org/main", None)
+    assert calls[1][0] == "org/tok" and "*.safetensors" in calls[1][1]
+
+
+@pytest.mark.asyncio
 async def test_running_but_unhealthy_is_still_loading_not_crashed():
     """Compose marks a slow first load unhealthy (~690s) while it keeps running."""
     profile = _profile()
@@ -210,6 +410,28 @@ async def test_wait_keeps_waiting_on_running_unhealthy(monkeypatch):
     stored = profile_store.StoredProfile(name="p", backend="vllm", port=8000)
     rc, _msg, _models = await readiness.wait_ready(stored, timeout=0, interval=0.01)
     assert rc == exit_codes.NOT_READY
+
+
+@pytest.mark.parametrize("source", ["shell", "profile"])
+def test_bind_host_reaching_compose_is_the_validated_common_value(tmp_path, monkeypatch, source):
+    common = tmp_path / ".env.common"
+    common.write_text("HF_CACHE_PATH=/data/hf\n")
+    profile_env = tmp_path / "p.env"
+    profile_env.write_text("BIND_HOST=10.0.0.9\n" if source == "profile" else "")
+    if source == "shell":
+        monkeypatch.setenv("BIND_HOST", "10.0.0.9")
+    monkeypatch.setattr(rt, "COMMON_ENV", common)
+    profile = rt.Profile(name="p")
+    monkeypatch.setattr(type(profile), "path", property(lambda self: profile_env))
+    assert rt._compose_env(profile, use_dev=False)["BIND_HOST"] == "127.0.0.1"
+    common.write_text("HF_CACHE_PATH=/data/hf\nBIND_HOST=0.0.0.0\n")
+    assert rt._compose_env(profile, use_dev=False)["BIND_HOST"] == "0.0.0.0"
+
+
+@pytest.mark.parametrize("key", ["BIND_HOST", "VLLM_CACHE_PATH"])
+def test_profile_env_vars_cannot_set_host_level_keys(key):
+    assert profile_store.is_protected_profile_env_key(key, "vllm")
+    assert profile_store.is_protected_profile_env_key(key, "llamacpp")
 
 
 @pytest.mark.asyncio

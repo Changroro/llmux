@@ -37,11 +37,19 @@ async def plan_switch(backend: str, name: str) -> tuple[profile_store.StoredProf
     )
     # A non-docker process on the port would only show up after the old model stopped.
     if not errors and row.port is not None and not held_by_source:
-        if local_port_in_use(row.port, "127.0.0.1"):
-            errors.append(f"Port {row.port} is used by another local process on 127.0.0.1")
+        host = _bind_host()
+        if local_port_in_use(row.port, host):
+            errors.append(f"Port {row.port} is used by another local process on {host}")
     if errors:
         raise RuntimeError("\n".join(errors))
     return target, [r.raw for r in sources]
+
+
+def _bind_host() -> str:
+    from tui.common.env import bind_host, parse_env_file
+
+    path = profile_store.PROJECT_ROOT / ".env.common"
+    return bind_host(parse_env_file(path) if path.exists() else {})
 
 
 async def stop_switch_sources(

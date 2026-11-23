@@ -1,4 +1,4 @@
-"""Regression tests for review round 2 (Codex findings D, E, G)."""
+"""Regression tests for review round 2 (Codex findings D, E, G, I)."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ async def test_unknown_release_without_local_image_is_unreachable(monkeypatch):
     monkeypatch.setattr(rt, "_ensure_profile_config", lambda _p, **_k: (True, []))
     monkeypatch.setattr(rt, "_render_profile_snapshot", lambda _n, **_k: (profile, "/x"))
     monkeypatch.setattr(rt, "_gpu_conflict_messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(rt, "exposure_warning", AsyncMock(return_value=""))
     monkeypatch.setattr(rt, "get_local_latest_tag", AsyncMock(return_value="none"))
     monkeypatch.setattr(rt, "get_dockerhub_release_version", AsyncMock(return_value="unknown"))
     events = [e async for e in rt.stream_container_up("p")]
@@ -155,6 +156,30 @@ def test_render_env_partial_failure_reports_error(monkeypatch):
     assert "bad env value" in result.stderr
 
 
+# I — prepare keys downloads on (repo, revision); weights win over tokenizer-only
+def test_prepare_keeps_distinct_revisions_and_prefers_weights():
+    config = rt.Config(
+        name="c",
+        model="org/main",
+        extra_params={
+            "revision": "r1",
+            "tokenizer": "org/main",
+            "tokenizer-revision": "r2",
+            "speculative-config": {"method": "eagle", "model": "org/draft"},
+        },
+    )
+    assert rt._prepare_repos(config) == [
+        ("model", "org/main", "r1"),
+        ("tokenizer", "org/main", "r2"),
+        ("draft model", "org/draft", ""),
+    ]
+    shared = rt.Config(
+        name="c", model="org/main",
+        extra_params={"tokenizer": "org/shared", "speculative-config": {"model": "org/shared"}},
+    )
+    assert rt._prepare_repos(shared) == [("model", "org/main", ""), ("draft model", "org/shared", "")]
+
+
 # dry-run validates in memory and writes nothing
 def test_check_env_validates_without_writing(tmp_path, monkeypatch):
     monkeypatch.setattr(profile_store, "RUNTIME_DIR", tmp_path, raising=False)
@@ -182,6 +207,7 @@ async def test_vllm_dry_run_renders_the_env_in_memory(monkeypatch):
     monkeypatch.setattr(rt, "_ensure_profile_config", lambda _p, **_k: (True, []))
     monkeypatch.setattr(rt, "_render_profile_snapshot", snapshot)
     monkeypatch.setattr(rt, "_gpu_conflict_messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(rt, "exposure_warning", AsyncMock(return_value=""))
     events = [e async for e in rt.stream_container_up("p", dry_run=True)]
     assert events[-1] == ("rc", 0)
     assert seen == [{"write": False}]
