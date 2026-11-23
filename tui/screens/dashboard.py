@@ -543,6 +543,40 @@ class DashboardScreen(Screen):
             on_ok,
         )
 
+    async def _bench(
+        self, backend: str, name: str, config_name: str, port, model: str, api_key: str
+    ) -> None:
+        """Ask for the `llmux bench` options, then run the same bench the CLI would."""
+        from tui.common.bench import load_summary, profile_kind, run_load, uses_load_mode
+        from tui.common.bench_modal import BenchOptionsModal
+
+        options = await self.app.push_screen_wait(BenchOptionsModal(name))
+        if options is None:
+            return
+        kind = options["kind"] if options["kind"] != "auto" else profile_kind(backend, config_name)
+        key = {"api_key": api_key} if api_key else {}
+        if not uses_load_mode(kind, options["concurrency"], options["requests"]):
+            self.notify(t(f"Benchmarking (warmup + {BENCH_RUNS} runs, {model})…",
+                          f"벤치마크 실행 (warmup+{BENCH_RUNS}회, {model})…"))
+            r = await run_bench(port, model, **key, runs=BENCH_RUNS, warmup=BENCH_WARMUP)
+            self.notify(
+                f"✓ median [b]{r['median_tps']:.1f} tok/s[/b] ({r['min_tps']:.1f}–{r['max_tps']:.1f})",
+                title=name, timeout=10,
+            )
+            return
+        served = await list_served_models(port, **key)
+        self.notify(t(f"Benchmarking {kind} ({served[0] if served else model})…",
+                      f"{kind} 벤치마크 실행 ({served[0] if served else model})…"))
+        r = await run_load(
+            port, served[0] if served else model, kind=kind,
+            concurrency=options["concurrency"] or 1,
+            requests=options["requests"] or BENCH_RUNS,
+            warmup=BENCH_WARMUP, **key,
+        )
+        passed = r["succeeded"] and not r["failed"]  # same rule as `llmux bench`
+        self.notify(("✓ " if passed else "✗ ") + load_summary(r), title=name, timeout=15,
+                    severity="information" if passed else "error")
+
     @work(exclusive=True, group="benchmark")
     async def _run_vllm_bench(self, row: DashboardRow) -> None:
         if not row.port:
@@ -558,24 +592,12 @@ class DashboardScreen(Screen):
                 raise RuntimeError(
                     "could not identify a served model (/v1/models returned nothing)"
                 )
-            self.notify(
-                t(
-                    f"Benchmarking (warmup + {BENCH_RUNS} runs, {model})…",
-                    f"벤치마크 실행 (warmup+{BENCH_RUNS}회, {model})…",
-                )
-            )
-            r = await run_bench(
-                row.port,
-                model,
-                **({"api_key": api_key} if api_key else {}),
-                runs=BENCH_RUNS,
-                warmup=BENCH_WARMUP,
-            )
-            self.notify(
-                f"✓ median [b]{r['median_tps']:.1f} tok/s[/b] "
-                f"({r['min_tps']:.1f}–{r['max_tps']:.1f})",
-                title=row.profile_name,
-                timeout=10,
+            from tui.common import profile_store
+
+            sp = profile_store.load_profile(row.profile_name, "vllm")
+            await self._bench(
+                "vllm", row.profile_name, (sp.config_name or sp.name) if sp else row.profile_name,
+                row.port, model, api_key,
             )
         except Exception as exc:
             self.notify(t(f"✗ benchmark failed: {exc}", f"✗ 벤치마크 실패: {exc}"),
@@ -722,25 +744,7 @@ class DashboardScreen(Screen):
                 raise ValueError(f"invalid benchmark alias in config {config_name!r}")
             if not profile.port:
                 raise ValueError(f"profile {profile.name!r} has no metrics port")
-            self.notify(
-                t(
-                    f"Benchmarking (warmup + {BENCH_RUNS} runs, {alias})…",
-                    f"벤치마크 실행 (warmup+{BENCH_RUNS}회, {alias})…",
-                )
-            )
-            r = await run_bench(
-                profile.port,
-                alias,
-                **({"api_key": api_key} if api_key else {}),
-                runs=BENCH_RUNS,
-                warmup=BENCH_WARMUP,
-            )
-            self.notify(
-                f"✓ median [b]{r['median_tps']:.1f} tok/s[/b] "
-                f"({r['min_tps']:.1f}–{r['max_tps']:.1f})",
-                title=profile.name,
-                timeout=10,
-            )
+            await self._bench("llamacpp", profile.name, config_name, profile.port, alias, api_key)
         except Exception as exc:
             self.notify(t(f"✗ benchmark failed: {exc}", f"✗ 벤치마크 실패: {exc}"),
                         severity="error")
