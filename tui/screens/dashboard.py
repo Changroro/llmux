@@ -97,7 +97,7 @@ class DashboardScreen(Screen):
         with Horizontal(id="mem-search-area"):
             yield Static(" 🔍 ", id="search-icon")
             yield Input(
-                placeholder="Estimate HF model memory (press m then type, Enter to run)",
+                placeholder="Estimate memory: HF model id or profile name (Enter to run)",
                 id="mem-search-input",
             )
         yield Static("", id="mem-result-bar")
@@ -1027,17 +1027,34 @@ class DashboardScreen(Screen):
             self._do_mem_estimate(model)
 
     @work(exclusive=True, group="mem-estimate")
-    async def _do_mem_estimate(self, model_id: str) -> None:
+    async def _do_mem_estimate(self, query: str) -> None:
+        """`query` is a HF model id, or a profile name to estimate as configured."""
+        from tui.common import profile_store
+        from tui.common.mem import gpu_fit, profile_estimate_request
+
         try:
             result_bar = self.query_one("#mem-result-bar", Static)
-            result_bar.update(f"  [dim]⏳ Estimating {model_id}...[/dim]")
+            result_bar.update(f"  [dim]⏳ Estimating {query}...[/dim]")
         except Exception:
             return
 
-        result = await estimate_model_memory(model_id)
+        model_id, options, gpu_ids, utilization, split = query, {}, None, 1.0, None
+        owner = profile_store.find_name_owner(query)
+        if owner is not None:
+            try:
+                model_id, options, gpu_ids, utilization, split = profile_estimate_request(
+                    profile_store.load_profile(query, owner)
+                )
+            except (OSError, ValueError) as exc:
+                result_bar.update(f"  📦 [bold]{query}[/bold]  [red]{exc}[/red]")
+                return
+
+        result = await estimate_model_memory(model_id, **options)
 
         match = re.search(r"~([\d.]+)GB", result)
         model_short = model_id.split("/")[-1] if "/" in model_id else model_id
+        if owner is not None:
+            model_short = f"{query} ({model_short})"
         if match is None:
             result_bar.update(
                 f"  📦 [bold]{model_short}[/bold]  [red]{result}[/red]"
@@ -1064,38 +1081,38 @@ class DashboardScreen(Screen):
             )
             return
 
-        n_gpus = len(self._gpus)
-        per_gpu_gb = est_gb / n_gpus if n_gpus > 1 else est_gb
+        try:
+            per_gpu_gb, rows = gpu_fit(
+                est_gb, self._gpus, gpu_ids=gpu_ids, utilization=utilization, split=split
+            )
+        except ValueError as exc:
+            result_bar.update(f"  📦 [bold]{model_short}[/bold]  {result}  [red]{exc}[/red]")
+            return
+        shared_by = split or len(rows)
         tp_note = (
-            f"  [dim]TP={n_gpus}: {per_gpu_gb:.1f}GB/GPU[/dim]"
-            if n_gpus > 1
+            f"  [dim]split over {shared_by}: {per_gpu_gb:.1f}GB/GPU[/dim]"
+            if shared_by > 1
             else ""
         )
+        if utilization != 1.0:
+            tp_note += f"  [dim]budget {utilization:g}×VRAM[/dim]"
         parts = []
         any_unknown = False
-        for g in self._gpus:
-            try:
-                total_gb = common_docker.parse_gpu_reading(
-                    g.memory_total, "memory total"
-                ) / 1024
-                if total_gb <= 0:
-                    raise ValueError(
-                        f"invalid GPU memory total: {g.memory_total!r}"
-                    )
-            except ValueError as exc:
+        bar_w = 12
+        for r in rows:
+            if r["over"] is None:
                 any_unknown = True
                 parts.append(
-                    f"GPU{g.index} [dim]{'░' * 12}[/dim] "
-                    f"[yellow]UNKNOWN[/yellow] {per_gpu_gb:.1f}/?GB ({exc})"
+                    f"GPU{r['index']} [dim]{'░' * bar_w}[/dim] "
+                    f"[yellow]UNKNOWN[/yellow] {per_gpu_gb:.1f}/?GB ({r['error']})"
                 )
                 continue
-            ratio = per_gpu_gb / total_gb
-            bar_w = 12
-            if ratio > 1.0:
+            ratio = r["ratio"]
+            if r["over"]:
                 bar = f"[red bold]{'✗' * bar_w}[/red bold]"
                 label = (
                     f"[red bold]OVER[/red bold] "
-                    f"{per_gpu_gb:.1f}/{total_gb:.0f}GB"
+                    f"{per_gpu_gb:.1f}/{r['budget_gb']:.0f}GB"
                 )
             else:
                 filled = round(ratio * bar_w)
@@ -1111,9 +1128,9 @@ class DashboardScreen(Screen):
                 )
                 label = (
                     f"[{color}]{ratio * 100:.0f}%[/{color}] "
-                    f"{per_gpu_gb:.1f}/{total_gb:.0f}GB"
+                    f"{per_gpu_gb:.1f}/{r['budget_gb']:.0f}GB"
                 )
-            parts.append(f"GPU{g.index} {bar} {label}")
+            parts.append(f"GPU{r['index']} {bar} {label}")
         unknown_note = "  [yellow]FIT UNKNOWN[/yellow]" if any_unknown else ""
         gpu_line = " [dim]│[/dim] ".join(parts)
         text = (

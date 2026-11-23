@@ -1,4 +1,4 @@
-"""Regression tests for review round 2 (Codex findings D, E, G, I)."""
+"""Regression tests for review round 2 (Codex findings D, E, G, H, I)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ import pytest
 from typer.testing import CliRunner
 
 from tui.backends.vllm import backend_runtime as rt
-from tui.common import exit_codes, profile_store
+from tui.common import exit_codes, mem, profile_store
+from tui.common.docker import GpuInfo
 
 
 class _Store:
@@ -154,6 +155,45 @@ def test_render_env_partial_failure_reports_error(monkeypatch):
     record = json.loads(result.stdout)
     assert record["ok"] is False and "bad env value" in record["error"]
     assert "bad env value" in result.stderr
+
+
+# H — mem-estimate follows the real TP/PP/DP layout
+def _gpu(index: str) -> GpuInfo:
+    return GpuInfo(index=index, name="g", memory_used="0", memory_total="16384", utilization="0", temperature="0")
+
+
+@pytest.mark.parametrize(
+    ("gpu_id", "tp", "extra", "used", "split"),
+    [
+        ("0,1", 1, {}, ["0"], 1),
+        ("1,0", 2, {}, ["1", "0"], 2),
+        ("0,1,2,3", 2, {"pipeline-parallel-size": 2}, ["0", "1", "2", "3"], 4),
+        ("0,1", 1, {"data-parallel-size": 2}, ["0", "1"], 1),
+    ],
+)
+def test_vllm_estimate_uses_parallel_layout(monkeypatch, gpu_id, tp, extra, used, split):
+    from tui.backends.vllm import backend_storage
+    from tui.backends.vllm.backend_common import Config
+
+    cfg = Config(name="c", model="org/m", extra_params=extra)
+    monkeypatch.setattr(backend_storage, "load_config", lambda _n: cfg)
+    stored = profile_store.StoredProfile(
+        name="p", backend="vllm", gpu_id=gpu_id, tensor_parallel_size=tp, config_name="c"
+    )
+    _model, _options, gpu_ids, _util, got_split = mem.profile_estimate_request(stored)
+    assert gpu_ids == used and got_split == split
+    per_gpu, rows = mem.gpu_fit(8.0, [_gpu("0"), _gpu("1"), _gpu("2"), _gpu("3")], gpu_ids=gpu_ids, split=got_split)
+    assert per_gpu == 8.0 / split and [r["index"] for r in rows] == used
+
+
+def test_vllm_estimate_rejects_layout_larger_than_gpu_list(monkeypatch):
+    from tui.backends.vllm import backend_storage
+    from tui.backends.vllm.backend_common import Config
+
+    monkeypatch.setattr(backend_storage, "load_config", lambda _n: Config(name="c", model="org/m"))
+    stored = profile_store.StoredProfile(name="p", backend="vllm", gpu_id="0", tensor_parallel_size=2, config_name="c")
+    with pytest.raises(ValueError, match="2 GPU"):
+        mem.profile_estimate_request(stored)
 
 
 # I — prepare keys downloads on (repo, revision); weights win over tokenizer-only

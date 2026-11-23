@@ -1655,7 +1655,7 @@ class SystemCommandFailureTests(unittest.TestCase):
         with patch.object(mem, "estimate_model_memory", AsyncMock(return_value="failed")), \
              patch.object(docker, "get_gpu_info", AsyncMock(return_value=[])):
             with self.assertRaises(typer.Exit) as ctx:
-                system.mem_estimate("org/model", json_out=False)
+                system.mem_estimate("org/model", profile=None, backend=None, json_out=False)
 
         self.assertEqual(ctx.exception.exit_code, 1)
 

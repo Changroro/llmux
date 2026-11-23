@@ -877,19 +877,24 @@ uv run llmux system gpu --json</code></pre>
 
     <h3 id="system-mem-estimate"><code>system mem-estimate</code></h3>
     <p>Estimate a Hugging Face model's VRAM footprint via <a href="https://pypi.org/project/hf-mem/" target="_blank"><code>hf-mem</code></a> — the same engine the TUI's memory estimator uses. Reads <code>HF_TOKEN</code> from <code>.env.common</code> (or the environment) for gated models.</p>
-    <pre data-lang="text"><code>llmux system mem-estimate MODEL_ID [OPTIONS]</code></pre>
+    <pre data-lang="text"><code>llmux system mem-estimate MODEL_ID [OPTIONS]
+llmux system mem-estimate --profile PROFILE [OPTIONS]</code></pre>
     <table>
       <thead><tr><th>Argument</th><th>Description</th></tr></thead>
-      <tbody><tr><td><code>MODEL_ID</code></td><td>Hugging Face model id, e.g. <code>Qwen/Qwen3-8B</code>. Required.</td></tr></tbody>
+      <tbody><tr><td><code>MODEL_ID</code></td><td>Hugging Face model id, e.g. <code>Qwen/Qwen3-8B</code>. Required unless <code>--profile</code> is given.</td></tr></tbody>
     </table>
     <table>
       <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
+        <tr><td><code>--profile</code>, <code>-p</code></td><td><em>none</em></td><td>Estimate a profile as configured. vLLM: the config <code>model</code>, <code>max-model-len</code> (vLLM's <code>32k</code>/<code>32K</code>/<code>auto</code> forms), <code>kv-cache-dtype</code>, <code>revision</code>, split over TP × PP GPUs and replicated DP times on the first GPUs of <code>gpu_id</code>, each measured against <code>gpu-memory-utilization</code>. llama.cpp: the profile's GGUF file, <code>ctx-size</code> and <code>cache-type-k</code> over its GPUs. Without it the estimate is split across every detected GPU.</td></tr>
+        <tr><td><code>--backend</code>, <code>-b</code></td><td><em>auto-detect</em></td><td>Backend of <code>--profile</code>.</td></tr>
         <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit the parsed estimate and per-GPU fit rows as one JSON object.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code>uv run llmux system mem-estimate Qwen/Qwen3-8B
-# → ~17.2GB (model: 15.3GB + KV: 1.9GB)</code></pre>
+# → ~17.2GB (model: 15.3GB + KV: 1.9GB)
+uv run llmux system mem-estimate --profile qwen3-8b --json</code></pre>
+    <p>Fit rows carry <code>budget_gb</code> (<code>total_gb</code> × <code>gpu-memory-utilization</code>, or the full card without a profile); <code>over</code> compares the per-GPU share against it. The TUI estimator (<code>m</code>) accepts a profile name in place of a model id and uses the same rules.</p>
     <p>JSON output sets <code>status</code> to <code>ok</code>, <code>over</code>, or <code>error</code>. A malformed, non-finite, or non-positive GPU memory reading produces an <code>error</code> row with <code>total_gb</code>, <code>ratio</code>, and <code>over</code> set to <code>null</code>. Unless another known GPU is over capacity, aggregate <code>any_over</code> is also <code>null</code>. Text output labels the row <code>UNKNOWN</code>; either format exits 1 when any GPU memory reading is unknown.</p>
 
     <h3 id="system-disk"><code>system disk</code></h3>
