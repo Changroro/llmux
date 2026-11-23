@@ -69,7 +69,9 @@ def _migrate_legacy_storage() -> None:
     """Fold legacy llama.cpp GGUF fields into the profile's hf_file (idempotent)."""
     import sys
 
-    if "--dry-run" in sys.argv[1:]:  # writes nothing; the dry run applies the rule in memory
+    args = sys.argv[1:]
+    # A dry run or a help page writes nothing; the dry run applies the rule in memory.
+    if "--dry-run" in args or "--help" in args or "-h" in args:
         return
     try:
         from tui.backends.llamacpp.backend import migrate_gguf_sources
