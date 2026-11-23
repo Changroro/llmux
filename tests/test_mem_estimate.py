@@ -102,3 +102,14 @@ def test_vllm_max_model_len_rejects_decimal_binary_suffix(monkeypatch):
     stored = profile_store.StoredProfile(name="p", backend="vllm", gpu_id="0", config_name="c")
     with pytest.raises(ValueError, match="max-model-len"):
         mem.profile_estimate_request(stored)
+
+
+def test_llamacpp_pending_quant_must_be_resolved_first(monkeypatch):
+    from tui.backends.llamacpp import backend as lbackend
+
+    monkeypatch.setattr(lbackend, "load_config", lambda _n: lbackend.Config(name="c", params={}))
+    stored = profile_store.StoredProfile(
+        name="p", backend="llamacpp", config_name="c", hf_repo="unsloth/X-GGUF:Q4_K_M",
+    )
+    with pytest.raises(ValueError, match="llmux prepare p"):
+        mem.profile_estimate_request(stored)

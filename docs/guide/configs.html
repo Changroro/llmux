@@ -99,10 +99,8 @@ max-model-len: 32768               # context length (lower than model default = 
     </div>
 
     <h2 id="llamacpp-configs">llama.cpp configs</h2>
-    <p>Keys map 1:1 to <code>llama-server</code> long flags: <code>--ctx-size 32768</code> becomes <code>ctx-size: 32768</code>, <code>--jinja</code> becomes <code>jinja: true</code>, <code>--temp 0.6</code> becomes <code>temp: 0.6</code>. At launch, <code>render-override.py</code> reads the config and renders a <code>command:</code> block for the container. See <a href="container-lifecycle.html">Container Lifecycle</a> for that flow.</p>
+    <p>Keys map 1:1 to <code>llama-server</code> long flags: <code>--ctx-size 32768</code> becomes <code>ctx-size: 32768</code>, <code>--jinja</code> becomes <code>jinja: true</code>, <code>--temp 0.6</code> becomes <code>temp: 0.6</code>, and <code>jinja: false</code> becomes <code>--no-jinja</code> (only when the image has that negated flag — otherwise the start fails; write on/off-style values quoted, e.g. <code>fit: "off"</code>). The model is never set here: <code>model</code>, <code>hf-repo</code>, <code>hf-file</code>, <code>models-dir</code> and their short forms are rejected in both keys and <code>extra-args</code> — the profile's <code>hf_repo</code> / <code>hf_file</code> own it. At launch, <code>render-override.py</code> reads the config and renders a <code>command:</code> block for the container. See <a href="container-lifecycle.html">Container Lifecycle</a> for that flow.</p>
     <pre data-lang="yaml"><code># config/llamacpp/example.yaml
-model-file: your-model.gguf        # GGUF filename (relative to models/)
-
 ctx-size: 8192                     # context length
 n-gpu-layers: 99                   # layers to offload to GPU. 99 = all
 
@@ -131,7 +129,6 @@ extra-args: []                     # validated additional llama-server args</cod
         <tr><th>Key</th><th>Type</th><th>Description</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>model-file</code></td><td>string</td><td>GGUF filename. Acts as a display/fallback value — the actual download source is the profile's <code>hf_repo</code> / <code>hf_file</code>.</td></tr>
         <tr><td><code>alias</code></td><td>string</td><td>Model name exposed at <code>/v1/models</code>.</td></tr>
         <tr><td><code>ctx-size</code></td><td>int</td><td>Context length in tokens.</td></tr>
         <tr><td><code>n-gpu-layers</code></td><td>int</td><td>Number of layers offloaded to GPU. <code>99</code> = all.</td></tr>
@@ -206,7 +203,6 @@ llmux config new my-model --backend vllm --model Qwen/Qwen3-8B --gpu-mem 0.9
 
 # Create a llama.cpp config, setting flags inline
 llmux config new gemma --backend llamacpp \
-    --set model-file=gemma-3-4b-it-q4_k_m.gguf \
     --set ctx-size=8192 \
     --set n-gpu-layers=99 \
     --set jinja=true

@@ -6,9 +6,8 @@
 #
 # Schema minimum = `name` + `backend`; anything omitted inherits from
 # `defaults.<backend>`. To actually start a profile, vLLM needs either
-# `model_id` or config/<name>.yaml with `model`, and llama.cpp needs GGUF
-# metadata (`model_file`, `hf_repo`, `hf_file`) plus a config with `model-file`
-# or the profile-level `model_file` fallback.
+# `model_id` or config/<name>.yaml with `model`, and llama.cpp needs `hf_repo`
+# plus `hf_file` — the one place the served GGUF is named.
 
 version: 1
 
@@ -46,6 +45,5 @@ profiles:
     port: 8080
     config_name: gemma-3-4b       # → config/llamacpp/gemma-3-4b.yaml
     gpu_id: "0"
-    model_file: gemma-3-4b-it-q4_k_m.gguf  # used for download and as config fallback
     hf_repo: unsloth/gemma-3-4b-it-GGUF
     hf_file: gemma-3-4b-it-q4_k_m.gguf

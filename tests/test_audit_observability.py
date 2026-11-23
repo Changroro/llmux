@@ -364,7 +364,7 @@ class DiskErrorBoundaryTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with patch.object(
-            backend, "_get_model_dir", side_effect=OSError("inventory failed")
+            backend, "_get_hf_cache_dir", side_effect=OSError("inventory failed")
         ), contextlib.redirect_stdout(stdout):
             with self.assertRaises(typer.Exit) as caught:
                 system.disk(backend="llamacpp", json_out=True)
@@ -386,7 +386,7 @@ class DiskErrorBoundaryTests(unittest.TestCase):
         from tui.cli import system
 
         stderr = io.StringIO()
-        with patch.object(backend, "_get_model_dir", return_value=SimpleNamespace()), patch.object(
+        with patch.object(
             backend, "_get_hf_cache_dir", side_effect=ValueError("HF_CACHE_PATH is required")
         ), contextlib.redirect_stderr(stderr):
             with self.assertRaises(typer.Exit) as caught:
@@ -590,7 +590,7 @@ class SystemScreenErrorTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(
             llama_system,
-            "_get_model_dir",
+            "_get_hf_cache_dir",
             side_effect=OSError("inventory failed"),
         ):
             await llama_system.SystemScreen._refresh_disk.__wrapped__(screen)

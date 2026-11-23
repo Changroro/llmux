@@ -102,7 +102,12 @@ profiles:
 
     <div class="admonition note">
       <p class="admonition-title"><code>hf_repo</code> and <code>hf_file</code> are required</p>
-      <p><code>render-override.py</code> raises an error if <code>hf_repo</code> is empty or no <code>.gguf</code> filename can be resolved. The profile's <code>hf_repo</code> / <code>hf_file</code> are the source of truth; the config's <code>model-file</code> key is only a display fallback.</p>
+      <p><code>render-override.py</code> raises an error if <code>hf_repo</code> or <code>hf_file</code> is empty. They are the only place the served model is named: config keys that pick a model (<code>model</code>, <code>hf-repo</code>, <code>hf-file</code>, <code>models-dir</code>, …) are rejected, and older <code>model_file</code> / <code>model-file</code> values are folded into <code>hf_file</code> automatically.</p>
+    </div>
+
+    <div class="admonition tip">
+      <p class="admonition-title">Draft models and mmproj</p>
+      <p>Speculative decoding and multimodal projectors stay raw config flags (e.g. <code>extra-args: [-hfd, org/draft-GGUF:Q8_0, --spec-type, draft-mtp]</code>, <code>mmproj: /root/.cache/huggingface/hub/models--org--repo/snapshots/&lt;rev&gt;/mmproj-F16.gguf</code>). <code>llmux prepare</code> reads them and pre-downloads the draft GGUF and any mmproj that lives in the HF cache; it fails with the correct path when a configured mmproj snapshot path is stale.</p>
     </div>
 
     <div class="admonition tip">
@@ -193,7 +198,7 @@ override-tensors:
     <h2 id="mtp-multi-token-prediction">MTP (Multi-Token Prediction)</h2>
     <p>Multi-Token Prediction is a speculative-decoding-style technique where the model predicts several tokens per step. Running it under llama.cpp through llmux requires three things to line up:</p>
 
-    <p><strong>1. An MTP-capable <code>llama.cpp</code> build.</strong> MTP support lands on specific branches before it reaches the official <code>server-cuda</code> image. Use a <a href="#dev-builds">dev build</a> to build a <code>llamacpp-dev:&lt;branch&gt;</code> image from a branch that has MTP support:</p>
+    <p><strong>1. An MTP-capable <code>llama.cpp</code> build.</strong> Recent official <code>server-cuda</code> images list <code>draft-mtp</code> under <code>--spec-type</code> (check with <code>llmux config flags --backend llamacpp</code>). For a branch that is not released yet, use a <a href="#dev-builds">dev build</a> to build a <code>llamacpp-dev:&lt;branch&gt;</code> image from a branch that has MTP support:</p>
     <pre data-lang="bash"><code># point .env.common at the branch, then:
 llmux image build-dev --backend llamacpp --branch &lt;mtp-branch&gt;</code></pre>
     <p>Then pin the profile to that image: <code>image_tag: llamacpp-dev:&lt;mtp-branch&gt;</code>.</p>
@@ -206,7 +211,7 @@ n-gpu-layers: 99
 ctx-size: 32768
 extra-args:
   - --spec-type
-  - mtp
+  - draft-mtp
   - --spec-draft-n-max
   - "4"           # tokens predicted per step
   - --parallel

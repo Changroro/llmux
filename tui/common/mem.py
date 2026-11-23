@@ -145,13 +145,15 @@ def profile_estimate_request(stored) -> tuple[str, dict, list[str] | None, float
             gpu_ids = gpu_ids[:used]
     else:
         from tui.backends.llamacpp import backend as lbackend
-        from tui.common.prepare import resolve_gguf_file
 
         params = lbackend.load_config(config_name).params
-        model = stored.hf_repo
-        gguf = resolve_gguf_file(params.get("model-file"), stored.model_file, stored.hf_file)
-        if gguf:
-            options["gguf_file"] = gguf
+        model, quant = lbackend.split_quant_ref(stored.hf_repo)
+        if quant and not stored.hf_file:
+            raise ValueError(
+                f"profile {stored.name}: :{quant} is not resolved to a GGUF yet — run `llmux prepare {stored.name}`"
+            )
+        if stored.hf_file:  # a split GGUF's first shard: hf-mem sums the other shards
+            options["gguf_file"] = stored.hf_file
         if params.get("ctx-size"):
             options["max_model_len"] = int(params["ctx-size"])
         cache_type = str(params.get("cache-type-k") or "").upper()

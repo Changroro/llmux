@@ -113,7 +113,6 @@
       <tbody>
         <tr><td><code>HF_TOKEN</code></td><td>Hugging Face access token for gated model downloads. Leave empty if you only use public repos.</td></tr>
         <tr><td><code>HF_CACHE_PATH</code></td><td>Host path mounted into containers as the Hugging Face cache. <strong>Must be an absolute path.</strong></td></tr>
-        <tr><td><code>MODEL_DIR</code></td><td>Legacy host directory used for old GGUF detection and disk views. Current downloads use <code>HF_CACHE_PATH</code>.</td></tr>
         <tr><td><code>LORA_BASE_PATH</code></td><td>vLLM only: host path holding LoRA adapters (mounted into the container as <code>/app/lora</code>).</td></tr>
         <tr><td><code>LLAMACPP_IMAGE</code></td><td>llama.cpp server image tag — defaults to <code>ghcr.io/ggml-org/llama.cpp:server-cuda</code>.</td></tr>
         <tr><td><code>LLAMACPP_REPO_URL</code></td><td>Source repo URL used by <code>llmux image build-dev</code> for llama.cpp dev builds. Defaults to the upstream <code>ggml-org/llama.cpp</code> repo.</td></tr>
@@ -160,7 +159,6 @@ profiles:
   - name: gemma-3-4b
     backend: llamacpp
     config_name: gemma-3-4b       # → config/llamacpp/gemma-3-4b.yaml
-    model_file: gemma-3-4b-it-q4_k_m.gguf
     hf_repo: unsloth/gemma-3-4b-it-GGUF
     hf_file: gemma-3-4b-it-q4_k_m.gguf</code></pre>
 

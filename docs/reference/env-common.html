@@ -152,13 +152,6 @@
           <td>Default source branch for vLLM dev builds.</td>
         </tr>
         <tr>
-          <td><code>MODEL_DIR</code></td>
-          <td>Optional&#8308;</td>
-          <td><code>/home/$USER/Project/docker/llmux/models</code></td>
-          <td>llama.cpp</td>
-          <td>Legacy GGUF detection and disk-view directory; not mounted by current profiles.</td>
-        </tr>
-        <tr>
           <td><code>LLAMACPP_IMAGE</code></td>
           <td>Optional</td>
           <td><code>ghcr.io/ggml-org/llama.cpp:server-cuda</code></td>
@@ -254,12 +247,9 @@ VLLM_BRANCH=main</code></pre>
 
     <h2 id="llama-cpp">llama.cpp</h2>
 
-    <h3 id="model-dir"><code>MODEL_DIR</code></h3>
-    <p>Legacy host directory used by old-file detection and the disk inventory view. Current profiles do not mount it into the container.</p>
-    <pre data-lang="ini"><code>MODEL_DIR=/home/$USER/.llmux/models</code></pre>
     <div class="admonition note">
       <p class="admonition-title">How llama.cpp gets its models</p>
-      <p>Current llama.cpp profiles do <strong>not</strong> rely on a pre-populated <code>MODEL_DIR</code>. <code>render-override.py</code> builds a <code>llama-server -hf &lt;repo&gt; -hff &lt;file&gt;</code> command from the profile's <code>hf_repo</code> / <code>hf_file</code>, so <code>llama-server</code> downloads the GGUF straight into the shared <code>HF_CACHE_PATH</code> — exactly like the vLLM flow, with no host-side <code>hf</code> CLI dependency.</p>
+      <p>llama.cpp profiles do not use a host model directory. <code>render-override.py</code> builds a <code>llama-server -hf &lt;repo&gt; -hff &lt;file&gt;</code> command from the profile's <code>hf_repo</code> / <code>hf_file</code>, so <code>llama-server</code> downloads the GGUF straight into the shared <code>HF_CACHE_PATH</code> — exactly like the vLLM flow, with no host-side <code>hf</code> CLI dependency.</p>
     </div>
 
     <h3 id="llamacpp-image"><code>LLAMACPP_IMAGE</code></h3>

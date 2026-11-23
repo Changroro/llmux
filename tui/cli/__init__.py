@@ -65,6 +65,21 @@ def _maybe_run_onboarding() -> None:
         print(f"Warning: onboarding did not complete ({exc}).", file=sys.stderr)
 
 
+def _migrate_legacy_storage() -> None:
+    """Fold legacy llama.cpp GGUF fields into the profile's hf_file (idempotent)."""
+    import sys
+
+    if "--dry-run" in sys.argv[1:]:  # writes nothing; the dry run applies the rule in memory
+        return
+    try:
+        from tui.backends.llamacpp.backend import migrate_gguf_sources
+
+        for message in migrate_gguf_sources():
+            print(f"migrated: {message}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — unrelated commands must still run
+        print(f"Warning: llama.cpp GGUF field migration failed ({exc}).", file=sys.stderr)
+
+
 def _maybe_check_for_update() -> None:
     """Check for a newer llmux release, in interactive sessions.
 
@@ -176,6 +191,7 @@ def _root(
         return
     else:
         _maybe_run_onboarding()
+        _migrate_legacy_storage()
         _maybe_check_for_update()
     if ctx.invoked_subcommand is not None:
         return

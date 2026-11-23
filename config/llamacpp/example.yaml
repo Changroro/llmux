@@ -5,11 +5,11 @@
 #       --jinja            →  jinja: true
 #       --temp 0.6         →  temp: 0.6
 
-# ═══ 필수 ═══
-
-# GGUF 파일명. 프로필의 hf_repo/hf_file 이 비어 있을 때만 파일명으로 쓰이며,
-# llama-server 가 `-hff <파일명>` 으로 HF 캐시에 직접 받는다 (호스트 마운트 아님).
-model-file: your-model.gguf
+# 모델(GGUF)은 config 가 아니라 프로필의 hf_repo / hf_file 로 정한다.
+# model / hf-repo / hf-file / models-dir 같은 모델 지정 키는 여기 쓰면 오류다.
+#
+# `key: false` 는 `--no-key` 로 렌더된다 (이미지에 그 플래그가 있을 때만, 없으면 오류).
+#   예: jinja: false → --no-jinja.  on/off 값을 받는 플래그는 따옴표로: fit: "off"
 
 # ═══ 자주 쓰는 플래그 ═══
 

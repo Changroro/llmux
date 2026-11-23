@@ -15,6 +15,7 @@ from tui.backends.llamacpp.backend import (
     Profile,
     delete_profile,
     list_config_names,
+    resolve_gguf_source,
     load_profile,
     save_profile,
     validate_name,
@@ -176,8 +177,8 @@ class ProfileFormScreen(ModalScreen[str | None]):
                     yield Input(
                         value=p.hf_repo if p else "",
                         placeholder=t(
-                            "org/Model-GGUF — required (in-container -hf download source)",
-                            "org/Model-GGUF — 필수 (컨테이너 내 -hf 다운로드 소스)",
+                            "org/Model-GGUF — required; org/Model-GGUF:Q4_K_M picks the file",
+                            "org/Model-GGUF — 필수; org/Model-GGUF:Q4_K_M 이면 파일 자동 선택",
                         ),
                         id="hf-repo-input",
                     )
@@ -186,19 +187,11 @@ class ProfileFormScreen(ModalScreen[str | None]):
                     yield Label("HF File")
                     yield Input(
                         value=p.hf_file if p else "",
-                        placeholder=t("(optional) model-Q4_K_M.gguf", "(선택) model-Q4_K_M.gguf"),
-                        id="hf-file-input",
-                    )
-
-                with Horizontal(classes="form-row"):
-                    yield Label("Model File")
-                    yield Input(
-                        value=p.model_file if p else "",
                         placeholder=t(
-                            "(optional) GGUF filename — only when it differs from HF File",
-                            "(선택) GGUF 파일명 — HF File과 다를 때만",
+                            "model-Q4_K_M.gguf (first shard if split) — blank with :QUANT",
+                            "model-Q4_K_M.gguf (분할이면 첫 shard) — :QUANT 쓰면 비움",
                         ),
-                        id="model-file-input",
+                        id="hf-file-input",
                     )
 
                 with Horizontal(classes="form-row"):
@@ -243,7 +236,6 @@ class ProfileFormScreen(ModalScreen[str | None]):
             return
         hf_repo = self.query_one("#hf-repo-input", Input).value.strip()
         hf_file = self.query_one("#hf-file-input", Input).value.strip()
-        model_file = self.query_one("#model-file-input", Input).value.strip()
 
         config_select = self.query_one("#config-select", Select)
         config_name = (
@@ -298,20 +290,24 @@ class ProfileFormScreen(ModalScreen[str | None]):
         if gpu_id and not re.match(r"^[0-9]+(,[0-9]+)*$", gpu_id):
             self.notify(t("GPU ID must be digits/commas (e.g. 0 or 0,1)", "GPU ID 는 숫자/콤마 (예: 0 또는 0,1)"), severity="error")
             return
-        if hf_repo and not re.match(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$", hf_repo):
-            self.notify(t("HF Repo format: org/name (e.g. unsloth/Qwen3-8B-GGUF)", "HF Repo 형식: org/name (예: unsloth/Qwen3-8B-GGUF)"), severity="error")
-            return
+        unchanged = (
+            self._profile is not None and hf_repo and hf_file
+            and (hf_repo, hf_file) == (self._profile.hf_repo, self._profile.hf_file)
+        )
+        if not unchanged:
+            try:
+                hf_repo, hf_file, gguf_warning = await resolve_gguf_source(hf_repo, hf_file)
+            except ValueError as exc:
+                self.notify(str(exc), severity="error", timeout=10)
+                return
+            if gguf_warning:
+                self.notify(gguf_warning, severity="warning", timeout=8)
         from tui.common.dev_build import image_tag_error
 
         tag_err = image_tag_error(image_tag)
         if tag_err:
             self.notify(tag_err, severity="error")
             return
-
-        # model_file defaults to hf_file when only the HF coordinates were
-        # provided — mirrors what Quick Setup does so a hand-built profile
-        # doesn't have to repeat the filename.
-        effective_model_file = model_file or hf_file
 
         if renaming and not await self._rename_allowed():
             return
@@ -325,7 +321,6 @@ class ProfileFormScreen(ModalScreen[str | None]):
             image_tag=image_tag,
             hf_repo=hf_repo,
             hf_file=hf_file,
-            model_file=effective_model_file,
             env_vars=env_vars,
         )
 
@@ -339,22 +334,6 @@ class ProfileFormScreen(ModalScreen[str | None]):
             self.notify(str(exc), severity="error", timeout=8)
             return
         self.notify(t(f"Saved: {name}", f"저장: {name}"), severity="information")
-        if not hf_repo:
-            self.notify(
-                t(
-                    "Cannot start container without HF Repo (-hf download source required)",
-                    "HF Repo 없이는 컨테이너 시작 불가 (-hf 다운로드 소스 필요)",
-                ),
-                severity="warning",
-            )
-        if not effective_model_file:
-            self.notify(
-                t(
-                    "No HF File/Model File — the linked config must have model-file to start",
-                    "HF File/Model File 없음 — 링크된 config 에 model-file 이 있어야 시작 가능",
-                ),
-                severity="warning",
-            )
         self._saved_name = name
         self._profile = p
         self._original_name = name

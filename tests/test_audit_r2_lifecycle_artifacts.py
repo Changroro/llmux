@@ -874,7 +874,6 @@ def test_llamacpp_override_is_atomic_owner_only_and_transactional(
 
     stored = SimpleNamespace(
         config_name="p",
-        model_file="model.gguf",
         hf_repo="org/repo",
         hf_file="model.gguf",
     )

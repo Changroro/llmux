@@ -86,6 +86,7 @@ def show_profile(
     bk = detect_backend(name, override=backend)
     sp = profile_store.load_profile(name, bk)
     data = asdict(sp)
+    data.pop("model_file")  # legacy input, folded into hf_file at startup
     data["container_name"] = sp.container_name or sp.name
     data["port"] = profile_port(sp)
     data["model"] = model_source(sp)
@@ -235,6 +236,34 @@ def _require_linked_config_exists(backend: str, profile_name: str, config_name: 
         )
 
 
+def _validate_image_tag(image_tag: str) -> None:
+    from tui.common.dev_build import image_tag_error
+
+    err = image_tag_error(image_tag)
+    if err:
+        raise typer.BadParameter(err, param_hint="--image-tag")
+
+
+def _require_gguf_source(hf_repo: str, hf_file: str) -> tuple[str, str]:
+    """(hf_repo, hf_file) for a llama.cpp profile, or a usage error.
+
+    `--hf-repo org/name:QUANT` picks the file by quant tag. The file is checked
+    against the live repo listing when HF is reachable; an unreachable HF only
+    warns, so a headless caller that already knows the repo is not blocked.
+    """
+    from tui.backends.llamacpp.backend import resolve_gguf_source
+
+    try:
+        repo, resolved_file, warning = run_async(
+            resolve_gguf_source(_normalize_hf_repo(hf_repo), hf_file)
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--hf-repo / --hf-file") from None
+    if warning:
+        typer.echo(f"Warning: {warning}", err=True)
+    return repo, resolved_file
+
+
 def _validate_profile_name(name: str, backend: str, *, param_hint: str = "NAME") -> None:
     if not _PROFILE_NAME_RE.match(name):
         raise typer.BadParameter(
@@ -316,10 +345,20 @@ def new_profile(
     set_env: list[str] = typer.Option(
         [], "--set", help="Repeatable: KEY=VALUE entries appended to env_vars."
     ),
+    image_tag: str = typer.Option(
+        "", "--image-tag",
+        help="Docker image override (e.g. 'llamacpp-dev:mtp_main'). Empty = backend default.",
+    ),
     # llama.cpp specific
-    model_file: str = typer.Option("", "--model-file", help="llama.cpp: GGUF filename."),
-    hf_repo: str = typer.Option("", "--hf-repo", help="llama.cpp: Hugging Face repo for download."),
-    hf_file: str = typer.Option("", "--hf-file", help="llama.cpp: HF file for download."),
+    hf_repo: str = typer.Option(
+        "", "--hf-repo",
+        help="llama.cpp (required): HF repo, or org/name:QUANT to pick the GGUF by quant tag.",
+    ),
+    hf_file: str = typer.Option(
+        "", "--hf-file",
+        help="llama.cpp: GGUF file inside the repo (first shard of a split GGUF); "
+             "required unless --hf-repo has :QUANT. See `llmux profile gguf-files`.",
+    ),
     json_out: bool = JSON_OPTION,
 ) -> None:
     """Create a new profile entry in profiles.yaml."""
@@ -340,11 +379,14 @@ def new_profile(
             "--tensor-parallel": bool(tensor_parallel),
         },
         llamacpp_only={
-            "--model-file": bool(model_file),
             "--hf-repo": bool(hf_repo),
             "--hf-file": bool(hf_file),
         },
     )
+    if image_tag:
+        _validate_image_tag(image_tag)
+    if backend == "llamacpp":
+        hf_repo, hf_file = _require_gguf_source(hf_repo, hf_file)
     # The container name becomes a docker object name — same lowercase rule the
     # TUI form enforces.
     if container_name:
@@ -388,9 +430,9 @@ def new_profile(
         lora_modules=lora_modules,
         extra_pip_packages=extra_pip,
         env_vars=_parse_set_kv(set_env, backend=backend),
-        model_file=model_file,
         hf_repo=hf_repo,
         hf_file=hf_file,
+        image_tag=image_tag,
     )
     profile_store.create_profile(sp)
     print(f"Created profile '{name}' (backend={backend})")
@@ -430,8 +472,9 @@ def edit_profile(
     unset_env: list[str] = typer.Option(
         [], "--unset", help="Repeatable: KEY to remove from env_vars."
     ),
-    model_file: Optional[str] = typer.Option(None, "--model-file"),
-    hf_repo: Optional[str] = typer.Option(None, "--hf-repo"),
+    hf_repo: Optional[str] = typer.Option(
+        None, "--hf-repo", help="llama.cpp: HF repo, or org/name:QUANT (re-picks the file)."
+    ),
     hf_file: Optional[str] = typer.Option(None, "--hf-file"),
     image_tag: Optional[str] = typer.Option(
         None, "--image-tag",
@@ -454,18 +497,26 @@ def edit_profile(
             "--tensor-parallel": tensor_parallel is not None,
         },
         llamacpp_only={
-            "--model-file": model_file is not None,
             "--hf-repo": hf_repo is not None,
             "--hf-file": hf_file is not None,
         },
     )
     env_updates = _parse_set_kv(set_env, backend=bk)
-    if image_tag is not None:
-        from tui.common.dev_build import image_tag_error
-
-        err = image_tag_error(image_tag)
-        if err:
-            raise typer.BadParameter(err, param_hint="--image-tag")
+    if image_tag:
+        _validate_image_tag(image_tag)
+    validated_source = None
+    if hf_repo is not None or hf_file is not None:
+        current = profile_store.load_profile(name, bk)
+        if current is None:
+            raise typer.BadParameter(f"profile '{name}' not found", param_hint="NAME")
+        validated_source = (current.hf_repo, current.hf_file)
+        hf_repo, hf_file = _require_gguf_source(
+            current.hf_repo if hf_repo is None else hf_repo,
+            # A new repo or quant tag picks its own file unless one is given.
+            "" if hf_repo is not None and hf_file is None else (
+                current.hf_file if hf_file is None else hf_file
+            ),
+        )
     if max_loras is not None and max_loras < 0:
         _validate_lora_limit(max_loras, param_hint="--max-loras")
     if max_lora_rank is not None and max_lora_rank < 0:
@@ -516,8 +567,11 @@ def edit_profile(
             sp.lora_modules = lora_modules
         if extra_pip is not None:
             sp.extra_pip_packages = extra_pip
-        if model_file is not None:
-            sp.model_file = model_file
+        if validated_source is not None and (sp.hf_repo, sp.hf_file) != validated_source:
+            raise ValueError(
+                f"profile '{name}' GGUF source changed while it was validated "
+                f"({validated_source[0]} → {sp.hf_repo}); retry"
+            )
         if hf_repo is not None:
             sp.hf_repo = hf_repo
         if hf_file is not None:
@@ -671,6 +725,43 @@ def _normalize_hf_repo(raw: str) -> str:
     return s
 
 
+@app.command("gguf-files")
+def gguf_files(
+    repo: str = typer.Argument(..., help="Hugging Face repo (org/name)."),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
+) -> None:
+    """List a repo's servable GGUF files — the values `--hf-file` accepts.
+
+    Split GGUFs show once (their first shard) with the summed size; mmproj
+    projector files are flagged. Mirrors the TUI Quick Setup file dropdown.
+    """
+    from tui.backends.llamacpp.backend import (
+        HfListingUnavailable,
+        group_gguf_entries,
+        list_hf_repo_files,
+    )
+
+    name = _normalize_hf_repo(repo).split(":", 1)[0]
+    error = profile_store.hf_repo_error(name)
+    if error:
+        raise typer.BadParameter(error, param_hint="REPO")
+    try:
+        rows = group_gguf_entries(run_async(list_hf_repo_files(name)))
+    except HfListingUnavailable as exc:
+        if json_out:
+            emit_json({"status": "error", "repo": name, "error": str(exc)})
+        else:
+            typer.echo(f"Error: could not list {name}: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    if json_out:
+        emit_json(rows)
+        return
+    for row in rows:
+        tag = "  [mmproj]" if row["mmproj"] else ""
+        shards = f"  ({row['shards']} shards)" if row["shards"] > 1 else ""
+        print(f"{row['size_bytes'] / 1024**3:7.1f} GB  {row['file']}{shards}{tag}")
+
+
 @app.command("quick-setup")
 @json_command
 def quick_setup(
@@ -710,11 +801,13 @@ def quick_setup(
     # llama.cpp-only
     hf_repo: str = typer.Option(
         "", "--hf-repo",
-        help="llama.cpp only: HuggingFace repo (e.g. unsloth/Qwen3-30B-A3B-GGUF).",
+        help="llama.cpp only: HuggingFace repo (e.g. unsloth/Qwen3-30B-A3B-GGUF), "
+             "or org/name:QUANT to pick the GGUF by quant tag.",
     ),
     hf_file: str = typer.Option(
         "", "--hf-file",
-        help="llama.cpp only: GGUF filename inside the repo (validated against HF API when reachable).",
+        help="llama.cpp only: GGUF filename inside the repo (validated against HF API when "
+             "reachable); omit when --hf-repo has :QUANT. See `llmux profile gguf-files`.",
     ),
     ctx_size: str = typer.Option(
         QUICK_SETUP_CTX_SIZE, "--ctx-size",
@@ -976,66 +1069,21 @@ def _quick_setup_llamacpp(
     override_tensors: str,
     copy_config_from: str,
 ) -> None:
-    repo = _normalize_hf_repo(hf_repo)
-    if not repo or not _LLAMACPP_REPO_RE.match(repo):
-        raise typer.BadParameter(
-            "llama.cpp quick-setup requires a valid HF repo (org/name).",
-            param_hint="--hf-repo",
-        )
-    if not hf_file:
-        raise typer.BadParameter(
-            "llama.cpp quick-setup requires --hf-file (GGUF filename inside the repo).",
-            param_hint="--hf-file",
-        )
+    repo, hf_file = _require_gguf_source(hf_repo, hf_file)
     _validate_port(port)
     _validate_gpu_id(gpu_id)
 
     from tui.backends.llamacpp.backend import (
         CONFIG_DIR as llamacpp_config_dir,
         Config as LcppConfig,
-        HfListingUnavailable,
-        list_hf_repo_files,
         load_config as l_load_config,
         save_config as l_save_config,
         validate_name as l_validate_name,
     )
 
-    # Validate the GGUF filename against the live repo listing when reachable.
-    # A failed lookup does not hard-fail (a headless caller may already know
-    # what's in the repo) but it must say the check was skipped — otherwise a
-    # typo'd --hf-file sails through and only surfaces at download time.
-    listing_available = True
-    try:
-        files = run_async(list_hf_repo_files(repo))
-    except HfListingUnavailable as exc:
-        typer.echo(
-            f"Warning: could not list {repo} ({exc}) — skipping --hf-file validation.",
-            err=True,
-        )
-        files = []
-        listing_available = False
-    gguf_files = [
-        str(f.get("path", ""))
-        for f in files
-        if isinstance(f, dict)
-        and f.get("type") == "file"
-        and str(f.get("path", "")).lower().endswith(".gguf")
-    ]
-    if listing_available and not gguf_files:
-        raise typer.BadParameter(
-            f"{repo} contains no GGUF files.", param_hint="--hf-file"
-        )
-    if gguf_files and hf_file not in gguf_files:
-        available = "\n  ".join(gguf_files[:20])
-        more = f"\n  ... ({len(gguf_files) - 20} more)" if len(gguf_files) > 20 else ""
-        raise typer.BadParameter(
-            f"'{hf_file}' not found in {repo}. Available GGUF files:\n  {available}{more}",
-            param_hint="--hf-file",
-        )
-
     # Auto-derive name: <repo-tail-without-GGUF>, lowercased + safe chars.
     if not name:
-        base = repo.rsplit("/", 1)[-1]
+        base = repo.split(":", 1)[0].rsplit("/", 1)[-1]
         base = re.sub(r"[-_]?GGUF$", "", base, flags=re.I)
         name = re.sub(r"[^a-z0-9_-]+", "-", base.lower()).strip("-")
     if not name:
@@ -1057,7 +1105,7 @@ def _quick_setup_llamacpp(
         src = l_load_config(copy_config_from)
         params.update(src.params)
         disabled_params = dict(src.disabled_params)
-    params["model-file"] = hf_file
+    params.pop("model-file", None)
 
     def _set_int(key: str, raw: str, *, param_hint: str) -> None:
         if not raw:
@@ -1086,14 +1134,9 @@ def _quick_setup_llamacpp(
     else:
         params.pop("cache-type-v", None)
 
-    if flash_attn:
-        params["flash-attn"] = True
-    else:
-        params.pop("flash-attn", None)
-    if jinja:
-        params["jinja"] = True
-    else:
-        params.pop("jinja", None)
+    # Explicit false: llama-server turns jinja on and flash-attn to auto when absent.
+    params["flash-attn"] = flash_attn
+    params["jinja"] = jinja
     if override_tensors:
         params["override-tensors"] = [override_tensors]
     else:
@@ -1119,7 +1162,6 @@ def _quick_setup_llamacpp(
                 port=int(port),
                 gpu_id=gpu_id,
                 config_name=final_name,
-                model_file=hf_file,
                 hf_repo=repo,
                 hf_file=hf_file,
             )

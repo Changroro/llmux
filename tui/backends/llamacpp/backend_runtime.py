@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import aclosing
 
 import asyncio
+import dataclasses
 import errno
 import json
 import os
@@ -34,6 +35,7 @@ from .backend import (
     Config,
     Profile,
     _parse_env_file,
+    extract_llama_server_flags,
     list_profile_names,
     load_config,
     load_profile,
@@ -276,12 +278,34 @@ def _compose_base_args(profile: Profile) -> list[str]:
     return args
 
 
-async def _render_override(profile_name: str, *, check: bool = False) -> tuple[int, str]:
+RENDER_FLAGS_ENV = "LLMUX_LLAMA_SERVER_FLAGS"
+
+
+async def _render_flags_env(params: dict, image_ref: str) -> dict[str, str]:
+    """Flag list the renderer needs to turn `key: false` into `--no-key`."""
+    on_off = _renderer()._BOOL_VALUE_FLAGS  # rendered as `--key off`, no flag list needed
+    if not any(value is False and key not in on_off for key, value in params.items()):
+        return {}
+    flags = await extract_llama_server_flags(image_ref)
+    return {RENDER_FLAGS_ENV: json.dumps(sorted(flags))}
+
+
+async def _render_override(profile: Profile, image_ref: str, *, check: bool = False) -> tuple[int, str]:
+    try:
+        extra = await _render_flags_env(
+            load_config(profile.config_name or profile.name).params, image_ref
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return 1, (
+            f"✗ llama-server flag list unavailable for {image_ref}: {exc}\n"
+            f"  `key: false` needs the image locally — run `llmux prepare {profile.name}` first."
+        )
     return await _run(
         sys.executable,
         str(SCRIPTS_DIR / "render-override.py"),
         *(["--check"] if check else []),
-        profile_name,
+        profile.name,
+        env={**os.environ, **extra} if extra else None,
     )
 
 
@@ -354,7 +378,7 @@ async def get_container_statuses() -> list[ContainerStatus]:
             if isinstance(alias, str) and alias.strip():
                 model_label = alias.strip()
         if not model_label:
-            model_label = profile.hf_repo or profile.model_file or ""
+            model_label = profile.hf_repo
 
         statuses.append(
             ContainerStatus(
@@ -630,6 +654,43 @@ def _ensure_profile_config(
         return True, messages
 
 
+async def _resolve_pending_quant(profile_name: str) -> str:
+    """Turn a stored `org/name:QUANT` into the real hf_repo / hf_file pair."""
+    from .backend import list_repo_ggufs, pick_gguf_for_quant, split_quant_ref
+
+    stored = profile_store.load_profile(profile_name, "llamacpp")
+    if stored is None:
+        raise ValueError(f"profile {profile_name!r} not found in backend 'llamacpp'")
+    repo, quant = split_quant_ref(stored.hf_repo)
+    if not quant:
+        return ""
+    hf_file = pick_gguf_for_quant(repo, quant, await list_repo_ggufs(repo))
+    profile_store.replace_profile(
+        profile_name,
+        dataclasses.replace(stored, hf_repo=repo, hf_file=hf_file),
+        expected=stored,
+    )
+    return f"▸ {repo}:{quant} → {hf_file}"
+
+
+_RENDERER = None
+
+
+def _renderer():
+    """render-override.py loaded in-process (dry-run renders without writing)."""
+    global _RENDERER
+    if _RENDERER is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "llmux_llamacpp_render_override", SCRIPTS_DIR / "render-override.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RENDERER = module
+    return _RENDERER
+
+
 def _render_profile_snapshot(profile_name: str, *, write: bool = True) -> tuple[Profile, Path]:
     with profile_store.storage_transaction():
         stored = profile_store.load_profile(profile_name, "llamacpp")
@@ -732,6 +793,16 @@ async def stream_container_up(
         yield ("rc", 1)
         return
 
+    if not dry_run:
+        try:
+            resolved = await _resolve_pending_quant(profile_name)
+        except (OSError, RuntimeError, ValueError) as exc:
+            yield ("log", f"✗ quant tag 해석 실패: {exc}")
+            yield ("rc", 1)
+            return
+        if resolved:
+            yield ("log", resolved)
+
     try:
         profile, _ = (
             _render_profile_snapshot(profile_name, write=False) if dry_run
@@ -828,9 +899,9 @@ async def stream_container_up(
         # The real `up` creates the default config first; nothing to render against yet.
         rc, out = 0, ""
     elif dry_run:
-        rc, out = await _render_override(profile_name, check=True)
+        rc, out = await _render_override(profile, resolved_image_tag, check=True)
     else:
-        rc, out = await _render_override(profile_name)
+        rc, out = await _render_override(profile, resolved_image_tag)
     if rc != 0:
         yield ("log", out.strip() or "✗ override 렌더 실패")
         yield ("rc", rc)
@@ -931,18 +1002,22 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         return
 
     try:
+        resolved = await _resolve_pending_quant(profile_name)
+    except (OSError, RuntimeError, ValueError) as exc:
+        yield ("log", f"✗ quant tag 해석 실패: {exc}")
+        yield ("rc", 1)
+        return
+    if resolved:
+        yield ("log", resolved)
+
+    try:
         profile, env_path = _render_profile_snapshot(profile_name)
     except (OSError, RuntimeError, ValueError) as exc:
         yield ("log", f"✗ profile env render 실패: {exc}")
         yield ("rc", 1)
         return
 
-    try:
-        hf_file = prepare.resolve_gguf_file(load_config(profile.config_name or profile.name).get("model-file"), profile.model_file, profile.hf_file)
-    except (OSError, RuntimeError, ValueError) as exc:
-        yield ("log", f"Error: {exc}")
-        yield ("rc", 1)
-        return
+    hf_file = profile.hf_file
     if not profile.hf_repo or not hf_file:
         yield ("log", f"✗ '{profile_name}' 에 hf_repo / hf_file 이 없습니다 — 받을 GGUF 를 특정할 수 없습니다.")
         yield ("log", f"  llmux profile edit {profile_name} --hf-repo <org/repo> --hf-file <파일.gguf>")
@@ -950,16 +1025,6 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         return
 
     yield ("log", f"▸ runtime env 렌더: {env_path}")
-
-    rc, out = await _render_override(profile_name)
-    if rc != 0:
-        yield ("log", out.strip() or "✗ override 렌더 실패")
-        yield ("rc", rc)
-        return
-    for line in out.splitlines():
-        if line.startswith("warning:"):
-            yield ("log", f"⚠ {line[len('warning:'):].strip()}")
-    yield ("log", f"▸ command 렌더: {_override_path(profile_name)}")
 
     image_ref = _resolve_runtime_image(profile)
     image_credential_error = dev_build.image_reference_credential_error(image_ref)
@@ -996,6 +1061,16 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         yield ("log", "✗ .env.common 의 HF_CACHE_PATH 가 비어 있습니다 — 받을 위치가 없습니다.")
         yield ("rc", 1)
         return
+
+    rc, out = await _render_override(profile, image_ref)
+    if rc != 0:
+        yield ("log", out.strip() or "✗ override 렌더 실패")
+        yield ("rc", rc)
+        return
+    for line in out.splitlines():
+        if line.startswith("warning:"):
+            yield ("log", f"⚠ {line[len('warning:'):].strip()}")
+    yield ("log", f"▸ command 렌더: {_override_path(profile_name)}")
 
     yield ("log", f"▸ {profile.hf_repo} / {hf_file} 다운로드 → {cache_path}")
     rc = -1

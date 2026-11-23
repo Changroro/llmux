@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
 import sys
@@ -13,16 +15,25 @@ _CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_CHECKOUT_ROOT))
 from tui.common import profile_store  # noqa: E402
 from tui.common.config_markers import load_yaml_mapping  # noqa: E402
-from tui.common.prepare import resolve_gguf_file  # noqa: E402
 
 ROOT = profile_store.PROJECT_ROOT
 CONFIG_DIR = ROOT / "config" / "llamacpp"
 RUNTIME_DIR = ROOT / ".runtime" / "llamacpp"
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_MANAGED_FLAGS = frozenset(
-    {"--host", "--port", "--webui", "--no-webui", "--metrics"}
-)
+_MANAGED_KEYS = ("no-webui", "webui", "no-ui", "ui", "metrics", "host", "port")
+_MANAGED_FLAGS = frozenset(f"--{key}" for key in _MANAGED_KEYS)
+# Every spelling llama-server accepts for "which model to serve"; llmux owns -hf/-hff.
+_MODEL_SOURCE_KEYS = frozenset({
+    "model", "m", "model-file", "model-url", "mu", "hf-repo", "hf", "hfr", "hf-file", "hff",
+    "docker-repo", "dr", "models-dir", "models-preset",
+})
+# shortcut: llama-server's model presets (`--embd-gemma-default`, `--fim-qwen-7b-spec`, …) set
+# the model and their own port; matched by name since the flag list has no descriptions.
+# `--spec-default` only tunes decoding. Revisit if upstream adds a preset named otherwise.
+_MODEL_PRESET = re.compile(r"(?!spec-default$)[a-z0-9.-]+-(default|spec)")
+_BOOL_VALUE_FLAGS = frozenset({"flash-attn"})
+FLAGS_ENV = "LLMUX_LLAMA_SERVER_FLAGS"
 
 
 def _validate_name(name: str, kind: str) -> str:
@@ -36,28 +47,37 @@ def _validate_name(name: str, kind: str) -> str:
 def render_command(
     cfg: dict,
     *,
-    model_file: str = "",
     hf_repo: str = "",
     hf_file: str = "",
+    known_flags: frozenset[str] | set[str] | None = None,
 ) -> list[str]:
     args: list[str] = [
         "--host", "0.0.0.0", "--port", "8080", "--no-webui", "--metrics",
     ]
 
-    configured_model_file = cfg.pop("model-file", "")
-    resolved_file = resolve_gguf_file(configured_model_file, model_file, hf_file)
     resolved_repo = hf_repo.strip()
+    resolved_file = hf_file.strip()
     if not resolved_repo:
         raise ValueError(
             "hf_repo is empty — set profile.hf_repo so llama-server can `-hf` download"
         )
+    if ":" in resolved_repo:
+        raise ValueError(
+            f"hf_repo {resolved_repo!r} still has an unresolved quant tag — run `llmux prepare`"
+        )
     if not resolved_file:
-        raise ValueError("hf_file / model_file is empty — need a specific .gguf filename")
+        raise ValueError("hf_file is empty — set profile.hf_file to a specific .gguf filename")
     args.extend(["-hf", resolved_repo])
     args.extend(["-hff", resolved_file])
-    cfg.pop("model-file", None)
 
-    for key in ("no-webui", "webui", "metrics", "host", "port"):
+    blocked = sorted(key for key in cfg if key in _MODEL_SOURCE_KEYS or _MODEL_PRESET.fullmatch(key))
+    if blocked:
+        raise ValueError(
+            f"config key(s) {', '.join(blocked)} pick the model, which llmux owns — "
+            "set the profile's hf_repo / hf_file instead"
+        )
+
+    for key in _MANAGED_KEYS:
         if key in cfg:
             print(
                 f"warning: config key '{key}' is managed by llmux and was ignored",
@@ -75,8 +95,6 @@ def render_command(
         extra_args = _string_list(extra_args_value, "extra-args")
     _validate_extra_args(extra_args)
 
-    _BOOL_VALUE_FLAGS = {"flash-attn"}
-
     for key, value in cfg.items():
         if not isinstance(key, str):
             raise ValueError(
@@ -88,6 +106,19 @@ def render_command(
                 args.extend([flag, "on" if value else "off"])
             elif value:
                 args.append(flag)
+            elif known_flags is None:
+                raise ValueError(
+                    f"config key '{key}: false' needs the image's flag list to render "
+                    f"--no-{key}; run it through llmux"
+                )
+            elif f"no-{key}" in known_flags:
+                args.append(f"--no-{key}")
+            else:
+                raise ValueError(
+                    f"config key '{key}: false' cannot be rendered: this llama-server "
+                    f"has no --no-{key}; remove the key, or quote an explicit value "
+                    f"(e.g. {key}: \"off\")"
+                )
         elif isinstance(value, list):
             for item in value:
                 args.extend([flag, _scalar_text(item, key)])
@@ -127,6 +158,22 @@ def _validate_extra_args(extra_args: list[str]) -> None:
         option = token.split("=", 1)[0]
         if option in _MANAGED_FLAGS:
             raise ValueError(f"extra-args cannot override llmux-managed option {option}")
+        name = option.lstrip("-")
+        if option.startswith("-") and (name in _MODEL_SOURCE_KEYS or _MODEL_PRESET.fullmatch(name)):
+            raise ValueError(
+                f"extra-args cannot set the model ({option}); llmux owns it — "
+                "set the profile's hf_repo / hf_file instead"
+            )
+
+
+def _known_flags_from_env() -> frozenset[str] | None:
+    raw = os.environ.get(FLAGS_ENV)
+    if raw is None:
+        return None
+    flags = json.loads(raw)
+    if not isinstance(flags, list) or not all(isinstance(f, str) for f in flags):
+        raise ValueError(f"{FLAGS_ENV} must be a JSON list of flag names")
+    return frozenset(flags)
 
 
 def main() -> int:
@@ -159,9 +206,9 @@ def main() -> int:
         try:
             command = render_command(
                 cfg,
-                model_file=stored.model_file,
                 hf_repo=stored.hf_repo,
                 hf_file=stored.hf_file,
+                known_flags=_known_flags_from_env(),
             )
         except ValueError as exc:
             print(f"config 렌더 실패: {exc}", file=sys.stderr)

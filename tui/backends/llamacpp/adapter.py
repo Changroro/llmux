@@ -20,7 +20,7 @@ class LlamacppAdapter:
             alias = config.get("alias", "")
             model = alias.strip() if isinstance(alias, str) else ""
             if not model:
-                model = p.hf_repo or p.model_file or ""
+                model = p.hf_repo
             detail = ""
             if p.model_size_gb is not None:
                 detail = f"{p.model_size_gb:.1f} GB"

@@ -326,7 +326,7 @@ class LlamacppPrepareHappyPathTests(unittest.IsolatedAsyncioTestCase):
             hf_repo="o/r", hf_file="m.gguf",
         )
 
-        async def render_ok(_name):
+        async def render_ok(_profile, _image):
             return (0, "")
 
         with tempfile.TemporaryDirectory() as tmpdir:

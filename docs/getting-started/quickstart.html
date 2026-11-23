@@ -150,7 +150,7 @@ llmux logs qwen3-0-6b --no-follow --tail 100   # snapshot of recent lines</code>
     </div>
 
     <h2 id="path-b-serve-a-model-with-llama-cpp">Path B — Serve a model with llama.cpp</h2>
-    <p>llama.cpp serves GGUF files. A llama.cpp profile needs GGUF metadata (<code>model_file</code>, <code>hf_repo</code>, <code>hf_file</code>) — llmux downloads the file automatically on first start, so there's no manual <code>hf download</code>.</p>
+    <p>llama.cpp serves GGUF files. A llama.cpp profile names its GGUF with <code>hf_repo</code> + <code>hf_file</code> (or <code>hf_repo: org/name:QUANT</code>; list a repo's files with <code>llmux profile gguf-files org/name</code>) — llmux downloads the file automatically on first start, so there's no manual <code>hf download</code>.</p>
 
     <h3 id="1-create-a-profile-llamacpp">1. Create a profile</h3>
     <p><code>quick-setup</code> supports both backends. For llama.cpp, pass the Hugging Face GGUF repository and filename.</p>

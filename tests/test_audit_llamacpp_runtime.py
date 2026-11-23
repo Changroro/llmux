@@ -217,7 +217,7 @@ class LlamacppDevImageAuditTests(unittest.IsolatedAsyncioTestCase):
             builds.append((args, kwargs))
             yield ("rc", 0)
 
-        async def stop_after_image(_profile_name: str):
+        async def stop_after_image(_profile, _image):
             return 1, "stop"
 
         globals_patch = {
@@ -230,6 +230,7 @@ class LlamacppDevImageAuditTests(unittest.IsolatedAsyncioTestCase):
             "get_dev_build_defaults": lambda: ("https://example.test/repo.git", "main"),
             "_stream_build_dev_image": build,
             "_render_override": stop_after_image,
+            "_resolve_pending_quant": AsyncMock(return_value=""),
             "_docker_run": AsyncMock(return_value=(0, "")),
         }
         with (
@@ -305,7 +306,6 @@ class LlamacppRendererAuditTests(unittest.TestCase):
             stderr = StringIO()
             stored = SimpleNamespace(
                 config_name="cfg",
-                model_file="",
                 hf_repo="org/repo",
                 hf_file="m.gguf",
             )
