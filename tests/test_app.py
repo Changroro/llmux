@@ -616,10 +616,19 @@ class ProfileParityTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(saved, [])
                 screen.query_one("#hf-file-input", Input).value = "m.gguf"
+                screen.query_one("#lora-modules-input", Input).value = "org/ad.bin"
+                screen.query_one("#save-btn").press()  # bad LoRA source
+                await pilot.pause()
+                self.assertEqual(saved, [])
+                screen.query_one("#lora-switch").value = True
+                screen.query_one("#lora-modules-input", Input).value = "org/ad/a.gguf:0.5"
                 screen.query_one("#save-btn").press()
                 await pilot.pause()
 
-        self.assertEqual([p.hf_file for p in saved], ["m.gguf"])
+        self.assertEqual(
+            [(p.hf_file, p.enable_lora, p.lora_modules) for p in saved],
+            [("m.gguf", True, "org/ad/a.gguf:0.5")],
+        )
 
     async def test_vllm_quick_setup_uses_custom_profile_name(self) -> None:
         from textual.widgets import Input

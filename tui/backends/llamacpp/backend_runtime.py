@@ -708,7 +708,7 @@ def _renderer():
 
 
 async def _preview_command(profile: Profile, image_ref: str, *, staged: bool) -> list[str]:
-    """llama-server argv for a dry run. Unless `staged` (image fetched),
+    """llama-server argv for a dry run. Unless `staged` (image and LoRAs fetched),
     it starts no container and writes nothing: flags come from the cache only."""
     config_name = profile.config_name or profile.name
     params = (
@@ -716,6 +716,8 @@ async def _preview_command(profile: Profile, image_ref: str, *, staged: bool) ->
         if (CONFIG_DIR / f"{config_name}.yaml").exists()
         else _default_config_params(config_name)
     )
+    from .backend import lora_args
+
     from tui.common.prepare import resolve_gguf_file
 
     env = await _render_flags_env(params, image_ref, cache_only=not staged)
@@ -726,6 +728,7 @@ async def _preview_command(profile: Profile, image_ref: str, *, staged: bool) ->
     hf_file = resolve_gguf_file(params.pop("model-file", None), stored.model_file if stored else "", profile.hf_file)
     return _renderer().render_command(
         params, hf_repo=profile.hf_repo, hf_file=hf_file, known_flags=flags,
+        lora=lora_args(stored, prepare.hf_cache_path(), planned=not staged) if stored is not None else (),
     )
 
 
@@ -1016,6 +1019,18 @@ async def stream_container_up(
                             return
                     else:
                         yield event
+            # LoRAs too: a failed download must surface before --replace stops anything.
+            async with aclosing(_download_loras(profile_name, prepare.hf_cache_path(), profile.container_name)) as _owned_stream:
+                async for event in _owned_stream:
+                    if event[0] == "rc":
+                        if int(event[1]) != 0:
+                            yield event
+                            return
+                    else:
+                        yield event
+        else:
+            for entry in _pending_loras(profile_store.load_profile(profile_name, "llamacpp"), prepare.hf_cache_path()):
+                yield ("log", f"Dry run: would download LoRA {entry.hf_repo}/{entry.hf_file}")
         try:
             server_args = await _preview_command(profile, resolved_image_tag, staged=stage_image)
         except FlagListNotCached as exc:
@@ -1033,6 +1048,15 @@ async def stream_container_up(
         })
         yield ("rc", 0)
         return
+
+    async with aclosing(_download_loras(profile_name, prepare.hf_cache_path(), profile.container_name)) as _owned_stream:
+        async for event in _owned_stream:
+            if event[0] == "rc":
+                if int(event[1]) != 0:
+                    yield event
+                    return
+            else:
+                yield event
 
     yield ("log", "▸ command 렌더링")
     rc, out = await _render_override(profile, resolved_image_tag)
@@ -1105,6 +1129,36 @@ async def stream_container_up(
             yield ("log", f"  Ready:    curl http://localhost:{profile.port}/v1/models")
             yield ("rc", 0)
             return
+
+
+def _pending_loras(stored: profile_store.StoredProfile | None, cache_path: str) -> list:
+    """The profile's enabled HF LoRA adapters not in the HF cache yet."""
+    from .backend import parse_lora_modules
+
+    if stored is None or not stored.enable_lora:
+        return []
+    return [
+        entry for entry in parse_lora_modules(stored.lora_modules)
+        if entry.hf_repo and not prepare.gguf_in_cache(cache_path, entry.hf_repo, entry.hf_file)
+    ]
+
+
+async def _download_loras(profile_name: str, cache_path: str, container_name: str, max_workers: int | None = None):
+    """Fetch the profile's HF LoRA adapters into the HF cache (in a container)."""
+    for entry in _pending_loras(profile_store.load_profile(profile_name, "llamacpp"), cache_path):
+        yield ("log", f"▸ LoRA: {entry.hf_repo} / {entry.hf_file} 다운로드 → {cache_path}")
+        rc = -1
+        async with aclosing(prepare.stream_llamacpp_download(hf_repo=entry.hf_repo, hf_file=entry.hf_file, cache_path=cache_path, token=prepare.hf_token(), container_name=prepare.prepare_container_name(container_name), max_workers=max_workers)) as _owned_stream:
+            async for event in _owned_stream:
+                if event[0] == "rc":
+                    rc = int(event[1])
+                else:
+                    yield event
+        if rc != 0:
+            yield ("log", f"✗ LoRA 다운로드 실패 (rc={rc}).")
+            yield ("rc", rc)
+            return
+    yield ("rc", 0)
 
 
 _DRAFT_REPO_KEYS = frozenset({"spec-draft-hf", "hf-repo-draft", "hfd", "hfrd"})
@@ -1255,6 +1309,16 @@ async def stream_container_prepare(profile_name: str, *, max_workers: int | None
         yield ("log", "✗ .env.common 의 HF_CACHE_PATH 가 비어 있습니다 — 받을 위치가 없습니다.")
         yield ("rc", 1)
         return
+
+    # LoRAs first: the render below names their HF-cache paths.
+    async with aclosing(_download_loras(profile_name, cache_path, profile.container_name, max_workers)) as _owned_stream:
+        async for event in _owned_stream:
+            if event[0] == "rc":
+                if int(event[1]) != 0:
+                    yield event
+                    return
+            else:
+                yield event
 
     rc, out = await _render_override(profile, image_ref)
     if rc != 0:

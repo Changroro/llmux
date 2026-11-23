@@ -50,6 +50,7 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts" / "llamacpp"
 COMMON_ENV = PROJECT_ROOT / ".env.common"
 LLAMACPP_OFFICIAL_REPO = "ghcr.io/ggml-org/llama.cpp"
 LLAMACPP_OFFICIAL_IMAGE = f"{LLAMACPP_OFFICIAL_REPO}:server-cuda"
+CONTAINER_HF_CACHE = "/root/.cache/huggingface"  # HF_CACHE_PATH's mount point in compose
 # unsloth publishes mainline-llama.cpp variants as `.gguf_file`; -hff accepts any repo path.
 MODEL_FILE_SUFFIXES = (".gguf", ".gguf_file")
 
@@ -174,6 +175,8 @@ class Profile:
     hf_repo: str = ""
     hf_file: str = ""
     image_tag: str = ""
+    enable_lora: bool = False
+    lora_modules: str = ""
     env_vars: dict[str, str] = field(default_factory=dict)
     downloaded: bool = False
     model_size_gb: float | None = None
@@ -212,6 +215,8 @@ def _to_profile(stored: profile_store.StoredProfile) -> Profile:
         hf_repo=stored.hf_repo,
         hf_file=stored.hf_file,
         image_tag=stored.image_tag,
+        enable_lora=stored.enable_lora,
+        lora_modules=stored.lora_modules,
         env_vars=dict(stored.env_vars),
     )
 
@@ -227,6 +232,8 @@ def _to_stored(profile: Profile) -> profile_store.StoredProfile:
         hf_repo=profile.hf_repo,
         hf_file=profile.hf_file,
         image_tag=profile.image_tag,
+        enable_lora=profile.enable_lora,
+        lora_modules=profile.lora_modules,
         env_vars=dict(profile.env_vars),
     )
 
@@ -792,3 +799,79 @@ def gguf_choice_error(repo: str, hf_file: str, ggufs: list[str]) -> str:
     more = f"\n  ... ({len(ggufs) - 20} more)" if len(ggufs) > 20 else ""
     return f"'{hf_file}' not found in {repo}. Available GGUF files:\n  {shown}{more}"
 
+
+@dataclass(frozen=True)
+class LoraEntry:
+    name: str
+    hf_repo: str = ""
+    hf_file: str = ""
+    path: str = ""   # container path, for adapters that are not on HF
+    scale: str = ""
+
+
+_LORA_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def parse_lora_modules(text: str) -> list[LoraEntry]:
+    """`[name=]org/repo/file.gguf[:scale]` or `[name=]/container/path.gguf[:scale]`, comma-separated."""
+    from tui.common.prepare import hf_file_error
+
+    entries: list[LoraEntry] = []
+    for raw in (part.strip() for part in text.split(",")):
+        if not raw:
+            continue
+        name, sep, source = raw.partition("=")
+        if not sep:
+            name, source = "", raw
+        elif not _LORA_NAME_RE.fullmatch(name):
+            raise ValueError(f"lora_modules: bad adapter name {name!r}")
+        scale = ""
+        if ":" in source:
+            source, scale = source.rsplit(":", 1)
+            try:
+                float(scale)
+            except ValueError:
+                raise ValueError(f"lora_modules: scale {scale!r} in {raw!r} is not a number") from None
+        if not source.lower().endswith(".gguf"):
+            raise ValueError(f"lora_modules: {raw!r} must name a .gguf adapter")
+        if source.startswith("/"):
+            entries.append(LoraEntry(name=name, path=source, scale=scale))
+            continue
+        org, repo, file = (source.split("/", 2) + ["", ""])[:3]
+        error = profile_store.hf_repo_error(f"{org}/{repo}") or (hf_file_error(file) if file else "missing file")
+        if error:
+            raise ValueError(f"lora_modules: {raw!r} is not org/repo/file.gguf ({error})")
+        entries.append(LoraEntry(name=name, hf_repo=f"{org}/{repo}", hf_file=file, scale=scale))
+    return entries
+
+
+def lora_args(
+    stored: profile_store.StoredProfile, cache_path: str, *, planned: bool = False
+) -> list[tuple[str, str]]:
+    """llama-server `--lora` / `--lora-scaled` pairs for a profile's static adapters.
+
+    `planned` (dry-run) names an adapter that is not downloaded yet by the
+    snapshot path it will get, with `<snapshot>` in place of the revision.
+    """
+    from tui.common.prepare import gguf_in_cache
+
+    if not stored.enable_lora:
+        return []
+    args: list[tuple[str, str]] = []
+    for entry in parse_lora_modules(stored.lora_modules):
+        path = entry.path
+        if not path:
+            cached = gguf_in_cache(cache_path, entry.hf_repo, entry.hf_file)
+            if cached is None and planned:
+                org, _, name = entry.hf_repo.partition("/")
+                path = f"{CONTAINER_HF_CACHE}/hub/models--{org}--{name}/snapshots/<snapshot>/{entry.hf_file}"
+                args.append(("--lora-scaled", f"{path}:{entry.scale}") if entry.scale else ("--lora", path))
+                continue
+            if cached is None:
+                raise ValueError(
+                    f"LoRA adapter {entry.hf_repo}/{entry.hf_file} is not in the HF cache — "
+                    f"run `llmux prepare {stored.name}`"
+                )
+            path = f"{CONTAINER_HF_CACHE}/{cached.relative_to(cache_path).as_posix()}"
+        args.append(("--lora-scaled", f"{path}:{entry.scale}") if entry.scale else ("--lora", path))
+    return args

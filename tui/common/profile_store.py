@@ -82,7 +82,7 @@ _PROFILE_KEYS_BY_BACKEND = {
         "extra_pip_packages",
     },
     "llamacpp": _SHARED_PROFILE_KEYS
-    | {"model_file", "hf_repo", "hf_file"},
+    | {"model_file", "hf_repo", "hf_file", "enable_lora", "lora_modules"},
 }
 _PROTECTED_ENV_KEYS = frozenset(
     {
@@ -567,6 +567,10 @@ def _validate_profile(profile: StoredProfile) -> None:
             raise ValueError(
                 f"profile {profile.name!r}: {field_name} must be a string"
             )
+    if profile.backend == "llamacpp" and profile.lora_modules:
+        from tui.backends.llamacpp.backend import parse_lora_modules
+
+        parse_lora_modules(profile.lora_modules)
     if profile.backend == "llamacpp" and profile.hf_repo:
         # `org/name:QUANT` is a pending quant selector that prepare/up resolve.
         repo, sep, quant = profile.hf_repo.partition(":")
@@ -655,6 +659,10 @@ def _profile_to_entry(
         if profile.extra_pip_packages:
             out["extra_pip_packages"] = profile.extra_pip_packages
     else:
+        if profile.enable_lora:
+            out["enable_lora"] = True
+        if profile.lora_modules:
+            out["lora_modules"] = profile.lora_modules
         if profile.hf_repo:
             out["hf_repo"] = profile.hf_repo
         if profile.hf_file:

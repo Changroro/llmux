@@ -180,6 +180,8 @@ class LlamacppDevImageAuditTests(unittest.IsolatedAsyncioTestCase):
             backend="llamacpp",
             container_name="p",
             image_tag="",
+            enable_lora=False,
+            lora_modules="",
         )
         profile = backend.Profile(name="p", container_name="p", port=8080)
         builds: list[tuple[tuple, dict]] = []
@@ -306,6 +308,8 @@ class LlamacppRendererAuditTests(unittest.TestCase):
             stderr = StringIO()
             stored = SimpleNamespace(
                 config_name="cfg",
+                enable_lora=False,
+                lora_modules="",
                 hf_repo="org/repo",
                 hf_file="m.gguf",
             )

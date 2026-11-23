@@ -227,6 +227,10 @@ extra-args:
       <p>The config schema only knows the common <code>llama-server</code> flags. <code>extra-args</code> is the escape hatch for newer or niche flags — <code>render-override.py</code> appends every item in the list to the command line untouched.</p>
     </div>
 
+    <h2 id="static-lora">Static LoRA adapters</h2>
+    <p>Set <code>enable_lora: true</code> and <code>lora_modules</code> on the profile (CLI <code>--lora --lora-modules …</code>, or the TUI profile form). Each entry is <code>[name=]org/repo/adapter.gguf[:scale]</code> or a container path ending in <code>.gguf</code>. <code>prepare</code> and <code>up</code> download Hugging Face adapters into the HF cache in a container, and the start command gets <code>--lora &lt;path&gt;</code>, or <code>--lora-scaled &lt;path&gt;:&lt;scale&gt;</code> when a scale is given. Switching adapters at runtime (<code>/lora-adapters</code>) is not managed by llmux.</p>
+    <pre data-lang="bash"><code>llmux profile edit my-model --lora --lora-modules "tone=org/tone-lora-GGUF/tone-F16.gguf:0.7"</code></pre>
+
     <h2 id="see-also">See also</h2>
     <ul>
       <li><a href="vllm.html">vLLM backend</a> — the HF Transformers counterpart</li>

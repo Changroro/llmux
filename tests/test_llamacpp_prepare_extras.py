@@ -89,6 +89,24 @@ async def test_stale_mmproj_snapshot_path_fails_with_the_right_path(tmp_path: Pa
     assert any(MMPROJ in line for line in logs), logs
 
 
+@pytest.mark.asyncio
+async def test_prepare_downloads_hf_lora_adapters_only(tmp_path: Path) -> None:
+    downloads: list = []
+    logs, rc = await _prepare(
+        tmp_path, {}, downloads,
+        enable_lora=True, lora_modules="tone=org/ad/tone.gguf:0.5,/root/local.gguf",
+    )
+    assert rc == 0, logs
+    assert downloads == [("org/ad", "tone.gguf"), ("o/r", "m.gguf")]  # adapters before the render
+
+
+@pytest.mark.asyncio
+async def test_disabled_lora_is_not_downloaded(tmp_path: Path) -> None:
+    downloads: list = []
+    _, rc = await _prepare(tmp_path, {}, downloads, enable_lora=False, lora_modules="org/ad/tone.gguf")
+    assert rc == 0 and downloads == [("o/r", "m.gguf")]
+
+
 @pytest.mark.parametrize(
     "model, files, expected",
     [
@@ -133,6 +151,20 @@ async def test_disabled_auto_mmproj_is_not_downloaded(tmp_path: Path) -> None:
     downloads: list = []
     _, rc = await _prepare(tmp_path, {"no-mmproj": True}, downloads, repo_files=("m.gguf", "mmproj-F16.gguf"))
     assert rc == 0 and downloads == [("o/r", "m.gguf")]
+
+
+@pytest.mark.asyncio
+async def test_prepare_downloads_lora_before_rendering(tmp_path: Path) -> None:
+    downloads: list = []
+    seen_at_render: list = []
+
+    async def render(*_a, **_k):
+        seen_at_render.extend(downloads)
+        return 0, ""
+
+    logs, rc = await _prepare(tmp_path, {}, downloads, render=render, enable_lora=True, lora_modules="org/ad/tone.gguf")
+    assert rc == 0, logs
+    assert ("org/ad", "tone.gguf") in seen_at_render
 
 
 def test_explicit_draft_file_wins_over_the_quant() -> None:
