@@ -604,7 +604,7 @@ class VllmConflictProbeAuditTests(unittest.IsolatedAsyncioTestCase):
         ):
             logs, rc = await _events(backend_runtime.stream_container_up("audit"))
 
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 5)  # exit_codes.UNREACHABLE
         self.assertIn("docker ps unavailable", "\n".join(logs))
 
     async def test_runtime_start_maps_gpu_probe_failure_to_rc(self) -> None:
@@ -633,7 +633,7 @@ class VllmConflictProbeAuditTests(unittest.IsolatedAsyncioTestCase):
         ):
             logs, rc = await _events(backend_runtime.stream_container_up("audit"))
 
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 5)  # exit_codes.UNREACHABLE
         self.assertIn("GPU inventory unavailable", "\n".join(logs))
 
 

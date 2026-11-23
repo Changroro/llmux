@@ -13,13 +13,23 @@ from tui.common.dev_build import repo_url_error
 from tui.common.i18n import t
 
 
-async def confirm_model_switch(screen, backend: str, name: str) -> bool:
-    from tui.common.model_switch import plan_switch, stop_switch_sources
+async def confirm_model_switch(screen, backend: str, name: str, precheck=None) -> bool:
+    """`precheck()` returns the dry-run start stream; it must pass before anything stops."""
+    from tui.common.model_switch import plan_switch, precheck_errors, stop_switch_sources
 
     try:
         target, sources = await plan_switch(backend, name)
         if not sources:
             return True
+        if precheck is not None:
+            errors = await precheck_errors(precheck())
+            if errors:
+                screen.notify(
+                    t(f"{name} would not start: ", f"{name} 기동 불가: ") + " / ".join(errors[:3]),
+                    severity="error",
+                    timeout=10,
+                )
+                return False
         names = ", ".join(f"{p.backend}/{p.name}" for p in sources)
         confirmed = await screen.app.push_screen_wait(ConfirmModal(
             t(

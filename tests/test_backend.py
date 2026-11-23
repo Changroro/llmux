@@ -1951,7 +1951,7 @@ class StreamContainerUpPortConflictTests(unittest.IsolatedAsyncioTestCase):
         ):
             events = [event async for event in backend.stream_container_up("p")]
 
-        self.assertEqual(events[-1], ("rc", 1))
+        self.assertEqual(events[-1], ("rc", 3))
         self.assertIn("Port 8000 is already in use", events[0][1])
 
     async def test_no_port_conflict_reaches_common_env_preflight(self) -> None:

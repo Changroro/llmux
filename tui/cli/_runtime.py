@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json as _json
+import shlex
 import sys
 from typing import Any, AsyncIterator, Iterable
 
@@ -43,13 +45,43 @@ def detect_backend(name: str, *, override: str | None = None) -> str:
     return matches[0]
 
 
+def model_source(sp: profile_store.StoredProfile) -> str:
+    """The weights a profile serves: the vLLM config `model`, or the GGUF repo/file."""
+    if sp.backend == "vllm":
+        from tui.backends.vllm.backend_storage import load_config
+
+        try:
+            model = load_config(sp.config_name or sp.name).model.strip()
+        except (OSError, ValueError):
+            model = ""
+        return model or sp.model_id or ""
+    return sp.hf_repo or sp.model_file or ""
+
+
 def run_async(coro):
     """Drive an async coroutine to completion, returning its result."""
     return asyncio.run(coro)
 
 
-def stream_async(agen: AsyncIterator) -> int:
-    """Print log events from an async generator and return its final rc event."""
+# Runtime log lines carrying these prefixes are diagnostics: they go to stderr.
+_DIAGNOSTIC_PREFIXES = ("Error", "✗", "Warning", "⚠")
+_ERROR_PREFIXES = ("Error", "✗")
+
+
+def stream_async(
+    agen: AsyncIterator,
+    *,
+    json_out: bool = False,
+    sink: dict | None = None,
+    quiet: bool = False,
+) -> int:
+    """Print log events from an async generator and return its final rc event.
+
+    Diagnostic lines go to stderr, the rest to stdout; with `json_out` every
+    line goes to stderr so stdout stays a single JSON record. `sink` collects
+    error lines and the dry-run `plan` for `finish_stream`. `quiet` drops
+    everything but diagnostics.
+    """
 
     async def _drive() -> int:
         rc: int | None = None
@@ -64,7 +96,19 @@ def stream_async(agen: AsyncIterator) -> int:
                     break
                 kind = evt[0]
                 if kind == "log":
-                    print(evt[1], flush=True)
+                    text = str(evt[1])
+                    stripped = text.lstrip()
+                    diagnostic = stripped.startswith(_DIAGNOSTIC_PREFIXES)
+                    if sink is not None and stripped.startswith(_ERROR_PREFIXES):
+                        sink.setdefault("errors", []).append(stripped)
+                    if diagnostic or not quiet:
+                        print(text, file=sys.stderr if json_out or diagnostic else sys.stdout, flush=True)
+                elif kind == "plan":
+                    if sink is not None:
+                        sink["plan"] = evt[1]
+                    if not quiet:
+                        command = " ".join(shlex.quote(str(a)) for a in evt[1].get("command", []))
+                        print(command, file=sys.stderr if json_out else sys.stdout, flush=True)
                 elif kind == "rc":
                     try:
                         rc = int(evt[1])
@@ -96,10 +140,66 @@ def stream_async(agen: AsyncIterator) -> int:
         return 130
 
 
-def emit_json(data: Any) -> None:
-    """Print a JSON payload (sorted keys, no trailing newline-magic)."""
-    _json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
-    sys.stdout.write("\n")
+def finish_stream(rc: int, *, json_out: bool, record: dict, sink: dict) -> None:
+    """Emit the JSON result record (in JSON mode) and exit with `rc`."""
+    if json_out:
+        result = {**record, "ok": rc == 0, "code": rc}
+        if rc != 0:
+            result["error"] = "\n".join(sink.get("errors", [])) or f"exit code {rc}"
+        if "plan" in sink:
+            result["plan"] = sink["plan"]
+        emit_json(result)
+    raise typer.Exit(code=rc)
+
+
+def fail(message: str, *, code: int, json_out: bool = False, record: dict | None = None) -> None:
+    """Report a CLI-level failure on stderr (plus a JSON record) and exit."""
+    typer.echo(message, err=True)
+    if json_out:
+        emit_json({**(record or {}), "ok": False, "code": code, "error": message})
+    raise typer.Exit(code=code)
+
+
+_json_emitted = False
+
+
+def emit_json(data: Any, *, stream=None) -> None:
+    """Print a JSON payload to stdout, followed by a newline."""
+    global _json_emitted
+    out = stream or sys.stdout
+    _json.dump(data, out, ensure_ascii=False, indent=2, default=str)
+    out.write("\n")
+    _json_emitted = True
+
+
+def json_emitted() -> bool:
+    return _json_emitted
+
+
+def json_command(fn):
+    """Give a write command a `--json` result record.
+
+    The command takes a `json_out` parameter and returns its record fields.
+    With --json its human output moves to stderr and stdout gets
+    `{"ok": true, "code": 0, **record}`. Failures exit through `main()`,
+    which emits the matching error record.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not kwargs.get("json_out"):
+            return fn(*args, **kwargs)
+        stdout = sys.stdout
+        with contextlib.redirect_stdout(sys.stderr):
+            record = fn(*args, **kwargs) or {}
+        emit_json({"ok": True, "code": 0, **record}, stream=stdout)
+
+    return wrapper
+
+
+JSON_OPTION = typer.Option(
+    False, "--json", help="Human output goes to stderr; stdout gets one JSON result record."
+)
 
 
 def emit_table(rows: Iterable[dict], columns: list[str]) -> None:

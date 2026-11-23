@@ -1235,6 +1235,13 @@ def _render_env_unlocked(profile: StoredProfile) -> Path:
     return out_path
 
 
+def check_env(profile: StoredProfile) -> Path:
+    """Validate and render the runtime env in memory; return where it would be written."""
+    _validate_profile(profile)
+    _render_env_lines(profile)
+    return runtime_env_path(profile.name, profile.backend)
+
+
 def render_env(profile: StoredProfile) -> Path:
     with _storage_lock():
         return _render_env_unlocked(profile)

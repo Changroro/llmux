@@ -211,6 +211,7 @@ class ContainerStatusConsumerTests(unittest.TestCase):
             container_name="alpha-container",
             status_text="restarting",
             running=True,
+            health="",
             port="8101",
             gpu_id="0",
             model="model",
@@ -219,7 +220,11 @@ class ContainerStatusConsumerTests(unittest.TestCase):
             backend_runtime,
             "get_container_statuses",
             AsyncMock(return_value=[status]),
-        ):
+        ), patch.object(
+            container.common_docker,
+            "container_images",
+            AsyncMock(return_value={"alpha-container": "vllm/vllm-openai:v1"}),
+        ), patch("tui.common.readiness.probe_served", AsyncMock(return_value=("loading", [], ""))):
             result = CliRunner().invoke(
                 container.app, ["ps", "--backend", "vllm", "--json"]
             )
@@ -228,6 +233,9 @@ class ContainerStatusConsumerTests(unittest.TestCase):
         rows = json.loads(result.output)
         self.assertEqual(rows[0]["status"], "restarting")
         self.assertIs(rows[0]["running"], True)
+        self.assertEqual(rows[0]["image"], "vllm/vllm-openai:v1")
+        self.assertEqual(rows[0]["port"], 8101)
+        self.assertIs(rows[0]["ready"], False)
 
 
 class RenderEnvSnapshotContractTests(unittest.TestCase):

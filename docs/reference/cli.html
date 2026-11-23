@@ -147,11 +147,45 @@ llmux --version            # print the installed version and exit</code></pre>
         <tr><td><code>system disk</code></td><td>backend storage report</td><td>backend-tagged storage object</td></tr>
         <tr><td><code>system env-check</code></td><td>report text</td><td>findings object</td></tr>
         <tr><td><code>update</code></td><td>status or confirmation flow</td><td>status/result object; use with <code>--check</code> or <code>--yes</code></td></tr>
+        <tr><td><code>container up</code></td><td>streamed startup log</td><td>log on stderr; one result object (with <code>plan</code> under <code>--dry-run</code>)</td></tr>
+        <tr><td><code>container prepare</code></td><td>streamed download log</td><td>log on stderr; one result object</td></tr>
+        <tr><td><code>container down</code></td><td>status line</td><td>result object</td></tr>
+        <tr><td><code>container wait</code></td><td>ready line</td><td>result object with <code>served_models</code></td></tr>
+        <tr><td><code>container render-env</code></td><td>rendered paths</td><td>result object (<code>path</code>, or <code>rendered</code>/<code>failed</code> lists)</td></tr>
+        <tr><td><code>profile new</code></td><td>status line</td><td>result object with the profile row</td></tr>
+        <tr><td><code>profile edit</code></td><td>status line</td><td>result object with the profile row</td></tr>
+        <tr><td><code>profile rename</code></td><td>status lines</td><td>result object with the profile row</td></tr>
+        <tr><td><code>profile clone</code></td><td>status lines</td><td>result object with the profile row</td></tr>
+        <tr><td><code>profile delete</code></td><td>status line</td><td>result object</td></tr>
+        <tr><td><code>profile quick-setup</code></td><td>status line</td><td>result object with the profile row</td></tr>
+        <tr><td><code>config new</code></td><td>written path</td><td>result object</td></tr>
+        <tr><td><code>config edit</code></td><td>written path</td><td>result object</td></tr>
+        <tr><td><code>config clone</code></td><td>written path</td><td>result object</td></tr>
+        <tr><td><code>config rename</code></td><td>status lines</td><td>result object with repointed profiles</td></tr>
+        <tr><td><code>config delete</code></td><td>status lines</td><td>result object with cleared profiles</td></tr>
+        <tr><td><code>image pull</code></td><td>raw docker output</td><td>output on stderr; result object</td></tr>
+        <tr><td><code>image remove</code></td><td>raw docker output</td><td>output on stderr; result object</td></tr>
+        <tr><td><code>image build-dev</code></td><td>streamed build log</td><td>log on stderr; result object with the image</td></tr>
       </tbody>
     </table>
+    <p>Write and lifecycle commands share one record shape: <code>{"ok": true, "code": 0, …}</code> on success and <code>{"ok": false, "code": N, "error": "…"}</code> on failure — including usage errors, which a <code>--json</code> run still reports as a record on stdout. Human-readable progress and every <code>Error</code>/<code>Warning</code> line go to stderr, so stdout holds only the record. In <code>ps</code>, <code>profile list</code> and <code>profile show</code>, <code>port</code> is always an integer and <code>model</code> is the weights source on both backends: the vLLM config <code>model</code>, or the llama.cpp <code>hf_repo</code> / <code>model_file</code> (with <code>hf_file</code> alongside).</p>
 
     <h3 id="exit-codes">Exit codes</h3>
-    <p>Lifecycle commands propagate the underlying <code>docker</code> / <code>docker compose</code> exit code. <code>Ctrl-C</code> while streaming (<code>up</code>, <code>logs</code>, <code>build-dev</code>) exits with <code>130</code>. <code>system env-check</code> exits <code>1</code> when <code>.env.common</code> is missing or has issues.</p>
+    <p>Every command uses the same codes, so scripts can branch on them without parsing text:</p>
+    <table>
+      <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code></td><td>Success. <code>down</code> on a stopped profile also succeeds.</td></tr>
+        <tr><td><code>1</code></td><td>The operation failed (bad config, crashed container — <code>up</code> stops it — or a failed docker/compose step that has no more specific code).</td></tr>
+        <tr><td><code>2</code></td><td>Usage error: unknown profile, invalid option or value.</td></tr>
+        <tr><td colspan="2">A declined confirmation (<code>profile delete</code>, <code>config delete</code>, <code>config rename</code>) is not an error: it exits <code>0</code> and, with <code>--json</code>, records <code>"action": "declined"</code>.</td></tr>
+        <tr><td><code>3</code></td><td>Conflict: the port or GPUs are taken (<code>up</code> pre-flight, <code>--replace</code> planning).</td></tr>
+        <tr><td><code>4</code></td><td>Not ready: the server is still running but did not answer <code>/v1/models</code> in time (<code>up</code>, <code>wait</code>). Continue with <code>llmux wait</code>.</td></tr>
+        <tr><td><code>5</code></td><td>Unreachable: docker, the registry or the network could not be queried — the state is unknown, not empty.</td></tr>
+        <tr><td><code>130</code></td><td>Interrupted with <code>Ctrl-C</code>.</td></tr>
+      </tbody>
+    </table>
+    <p><code>system env-check</code> exits <code>1</code> when <code>.env.common</code> is missing or has issues; <code>image pull</code>/<code>remove</code> pass through docker's own code.</p>
 
     <h2 id="container-container-lifecycle"><code>container</code> — container lifecycle</h2>
     <pre data-lang="text"><code>llmux container up|prepare|down|logs|ps|benchmark|stats|render-env …</code></pre>
@@ -179,7 +213,11 @@ llmux --version            # print the installed version and exit</code></pre>
         <tr><td><code>--repo-url</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td><code>--dev</code> only: override the source repo URL (default from <code>VLLM_REPO_URL</code> / <code>LLAMACPP_REPO_URL</code>).</td></tr>
         <tr><td><code>--branch</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td><code>--dev</code> only: override the source branch (default from <code>VLLM_BRANCH</code> / <code>LLAMACPP_BRANCH</code>).</td></tr>
         <tr><td><code>--force</code></td><td><code>False</code></td><td>both</td><td>Allow a detected GPU overlap. Port conflicts and failed port probes always abort.</td></tr>
-        <tr><td><code>--replace</code></td><td><code>False</code></td><td>both</td><td>Stop managed models sharing the target GPUs, verify their exit, then start this profile. Cannot be combined with --force.</td></tr>
+        <tr><td><code>--replace</code></td><td><code>False</code></td><td>both</td><td>Stop managed models sharing the target GPUs, verify their exit, then start this profile. Every start check (config, env, the target port on the host — ports held by the models being replaced excepted) runs first, and the image is pulled or built; if any of it fails nothing is stopped. The start that follows uses that local image and does not pull again. Cannot be combined with --force.</td></tr>
+        <tr><td><code>--stall-timeout</code></td><td><code>45</code></td><td>both</td><td>Seconds without log or download progress before startup counts as stalled.</td></tr>
+        <tr><td><code>--timeout</code></td><td><code>1800</code></td><td>both</td><td>Total seconds to wait for <code>/v1/models</code> once nothing is downloading. A stalled or timed-out server is left running and exits <code>4</code>; a container that crashed is stopped and exits <code>1</code>; a server that answers with an error (e.g. HTTP 401 for a wrong <code>api-key</code>) is left running and exits <code>1</code>.</td></tr>
+        <tr><td><code>--dry-run</code></td><td><code>False</code></td><td>both</td><td>Validate in memory and print the <code>docker compose</code> command and image. Writes no file and never builds, pulls, stops or starts anything. The port check is left to the pre-flight.</td></tr>
+        <tr><td><code>--json</code></td><td><code>False</code></td><td>both</td><td>Log on stderr; one result record on stdout.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code># Start a vLLM profile (official image, highest local versioned tag)
@@ -214,6 +252,7 @@ uv run llmux up gemma-3-4b --dev \
       <tbody>
         <tr><td><code>--backend</code>, <code>-b</code></td><td><em>auto-detect</em></td><td>Force backend; auto-detect if omitted.</td></tr>
         <tr><td><code>--max-workers</code>, <code>-w</code></td><td><em>from <code>PREPARE_MAX_WORKERS</code></em></td><td>Positive parallel download connection count for this run. Omit it to use <code>.env.common</code>; an empty shared setting leaves the downloader library default unchanged.</td></tr>
+        <tr><td><code>--json</code></td><td><code>False</code></td><td>Log on stderr; one result record on stdout.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code>uv run llmux prepare qwen3-0-6b
@@ -224,7 +263,7 @@ uv run llmux prepare gemma-3-4b --backend llamacpp</code></pre>
     </div>
 
     <h3 id="container-down"><code>container down</code></h3>
-    <p>Stop a profile's container.</p>
+    <p>Stop a profile's container. Stopping a profile that is not running succeeds (exit <code>0</code>).</p>
     <pre data-lang="text"><code>llmux container down PROFILE [OPTIONS]</code></pre>
     <table>
       <thead><tr><th>Argument</th><th>Description</th></tr></thead>
@@ -234,9 +273,25 @@ uv run llmux prepare gemma-3-4b --backend llamacpp</code></pre>
       <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>--backend</code>, <code>-b</code></td><td><em>auto-detect</em></td><td>Force backend; auto-detect if omitted.</td></tr>
+        <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit one result record.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code>uv run llmux container down qwen3-0-6b</code></pre>
+
+    <h3 id="container-wait"><code>container wait</code> · <code>wait</code></h3>
+    <p>Block until a started profile answers <code>/v1/models</code>. Use it after <code>up</code> exits <code>4</code> (still loading), or after starting from the TUI.</p>
+    <pre data-lang="text"><code>llmux container wait PROFILE [OPTIONS]</code></pre>
+    <table>
+      <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>--backend</code>, <code>-b</code></td><td><em>auto-detect</em></td><td>Force backend; auto-detect if omitted.</td></tr>
+        <tr><td><code>--timeout</code></td><td><code>600</code></td><td>Seconds to wait before giving up.</td></tr>
+        <tr><td><code>--interval</code>, <code>-i</code></td><td><code>3</code></td><td>Seconds between probes.</td></tr>
+        <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit one result record (with <code>served_models</code>).</td></tr>
+      </tbody>
+    </table>
+    <p>Exits <code>0</code> when ready, <code>4</code> when still loading at the timeout, <code>1</code> when the container is missing, exited, dead or restarting, or the server answers wrongly (HTTP error other than 503, unreadable API key) — a running container whose healthcheck reports <code>unhealthy</code> or that answers 503 is still loading and keeps being waited on — and <code>5</code> when docker cannot be queried.</p>
+    <pre data-lang="bash"><code>uv run llmux up qwen3-0-6b --timeout 60 || [ $? -eq 4 ] && uv run llmux wait qwen3-0-6b --timeout 1800</code></pre>
 
     <h3 id="container-logs"><code>container logs</code></h3>
     <p>Stream container logs (<code>Ctrl-C</code> to stop following).</p>
@@ -270,8 +325,8 @@ uv run llmux container logs qwen3-0-6b -n 50 --no-follow</code></pre>
         <tr><td><code>--running</code>, <code>-r</code></td><td><code>False</code></td><td>Only show running containers.</td></tr>
       </tbody>
     </table>
-    <p>Table columns: <code>backend</code>, <code>profile</code>, <code>status</code>, <code>port</code>, <code>gpu</code>, <code>container</code>, <code>model</code>. JSON rows additionally include a boolean <code>running</code> field.</p>
-    <p>Status preserves Docker lifecycle and health: <code>healthy</code>, <code>unhealthy</code>, <code>starting</code>, <code>running</code>, <code>paused</code>, <code>restarting</code>, <code>removing</code>, <code>created</code>, <code>exited</code>, <code>dead</code>, <code>unknown</code>, or <code>stopped</code>. Model labels come from the vLLM config's <code>model</code> (then profile <code>model_id</code>) or the llama.cpp config's <code>alias</code> (then <code>hf_repo</code>, then <code>model_file</code>).</p>
+    <p>Table columns: <code>backend</code>, <code>profile</code>, <code>status</code>, <code>ready</code>, <code>port</code>, <code>gpu</code>, <code>container</code>, <code>model</code>. JSON rows also include <code>running</code>, <code>health</code> (Docker healthcheck or <code>null</code>), <code>ready</code> (the server answers <code>/v1/models</code>), <code>served_models</code>, <code>ready_error</code> (only when <code>ready</code> is <code>null</code>: the server answered wrongly or its API key could not be read), <code>image</code> (the image the container was created from, or <code>null</code>) and, for llama.cpp, <code>hf_file</code>. <code>port</code> is an integer.</p>
+    <p>Status preserves Docker lifecycle and health: <code>healthy</code>, <code>unhealthy</code>, <code>starting</code>, <code>running</code>, <code>paused</code>, <code>restarting</code>, <code>removing</code>, <code>created</code>, <code>exited</code>, <code>dead</code>, <code>unknown</code>, or <code>stopped</code>. <code>model</code> is the weights source: the vLLM config's <code>model</code> (then profile <code>model_id</code>), or the llama.cpp <code>hf_repo</code> (then <code>model_file</code>). The served alias shows up in <code>served_models</code>.</p>
     <pre data-lang="bash"><code>uv run llmux ps
 uv run llmux ps --running --json
 uv run llmux container ps -b vllm</code></pre>
@@ -287,6 +342,7 @@ uv run llmux container ps -b vllm</code></pre>
       <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>--backend</code>, <code>-b</code></td><td><em>all</em></td><td>Limit when rendering all (no <code>PROFILE</code> given).</td></tr>
+        <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit one result record.</td></tr>
       </tbody>
     </table>
     <pre data-lang="bash"><code># Re-render a single profile
@@ -746,7 +802,7 @@ uv run llmux image list --remote --json</code></pre>
     <table>
       <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>--backend</code></td><td><code>vllm</code></td><td>Select backend-aware repository and tag defaults.</td></tr>
+        <tr><td><code>--backend</code>, <code>-b</code></td><td><code>vllm</code></td><td>Select backend-aware repository and tag defaults.</td></tr>
         <tr><td><code>--repo</code></td><td><em>backend default</em></td><td>Image repository override.</td></tr>
       </tbody>
     </table>
@@ -781,8 +837,8 @@ uv run llmux image remove vllm/vllm-openai:v0.20.0 --force</code></pre>
         <tr><th>Option</th><th>Default</th><th>Backend</th><th>Description</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>--backend</code></td><td><code>vllm</code></td><td>both</td><td>Which backend to build for (<code>vllm</code> or <code>llamacpp</code>).</td></tr>
-        <tr><td><code>--branch</code>, <code>-b</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td>Source branch. Falls back to <code>VLLM_BRANCH</code> / <code>LLAMACPP_BRANCH</code> (default <code>main</code> / <code>master</code>).</td></tr>
+        <tr><td><code>--backend</code>, <code>-b</code></td><td><code>vllm</code></td><td>both</td><td>Which backend to build for (<code>vllm</code> or <code>llamacpp</code>).</td></tr>
+        <tr><td><code>--branch</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td>Source branch. Falls back to <code>VLLM_BRANCH</code> / <code>LLAMACPP_BRANCH</code> (default <code>main</code> / <code>master</code>).</td></tr>
         <tr><td><code>--repo-url</code></td><td><em>from <code>.env.common</code></em></td><td>both</td><td>Source repo URL. Falls back to <code>VLLM_REPO_URL</code> / <code>LLAMACPP_REPO_URL</code>.</td></tr>
         <tr><td><code>--tag</code>, <code>-t</code></td><td><em>branch name</em></td><td>both</td><td>Custom output tag.</td></tr>
         <tr><td><code>--official</code></td><td><code>False</code></td><td>vLLM</td><td>Build with upstream Dockerfile defaults (skips local GPU-arch detection patches). Ignored for llama.cpp with a warning.</td></tr>
@@ -841,7 +897,7 @@ uv run llmux system gpu --json</code></pre>
     <table>
       <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>--backend</code>, <code>-b</code></td><td><code>llamacpp</code></td><td><code>vllm</code> or <code>llamacpp</code>.</td></tr>
+        <tr><td><code>--backend</code>, <code>-b</code></td><td><code>vllm</code></td><td><code>vllm</code> or <code>llamacpp</code>.</td></tr>
         <tr><td><code>--json</code></td><td><code>False</code></td><td>Emit a backend-tagged storage object.</td></tr>
       </tbody>
     </table>

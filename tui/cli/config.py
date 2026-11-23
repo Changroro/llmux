@@ -15,7 +15,7 @@ from typing import Optional
 import typer
 import yaml
 
-from tui.cli._runtime import BACKENDS, emit_json, emit_table, run_async
+from tui.cli._runtime import BACKENDS, JSON_OPTION, emit_json, emit_table, json_command, run_async
 from tui.cli.profile import _validate_gpu_mem
 from tui.common import profile_store
 from tui.common.config_markers import load_yaml_mapping
@@ -320,6 +320,7 @@ def show_config(
 
 
 @app.command("new")
+@json_command
 def new_config(
     name: str = typer.Argument(..., help="Config name (becomes <name>.yaml)."),
     backend: str = typer.Option("vllm", "--backend", "-b"),
@@ -331,6 +332,7 @@ def new_config(
         [], "--set", help="Repeatable: KEY=VALUE entries. YAML-typed values."
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite if file exists."),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Create a new config YAML."""
     _validate_new_name(name)
@@ -363,9 +365,11 @@ def new_config(
             raise typer.BadParameter(f"config already exists: {path} (use --overwrite)")
         saved = _backend_save_config(backend, name, data)
     print(saved)
+    return {"action": "created", "backend": backend, "config": name, "path": str(saved)}
 
 
 @app.command("edit")
+@json_command
 def edit_config(
     name: str = typer.Argument(...),
     backend: Optional[str] = typer.Option(None, "--backend", "-b"),
@@ -379,6 +383,7 @@ def edit_config(
     ),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     gpu_memory_utilization: Optional[str] = typer.Option(None, "--gpu-mem"),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Patch fields in an existing config."""
     parsed_set = _parse_set_kv(set_kv)
@@ -431,9 +436,11 @@ def edit_config(
             disabled.pop(k, None)
         saved = _backend_save_config(bk, name, data, disabled)
     print(saved)
+    return {"action": "updated", "backend": bk, "config": name, "path": str(saved)}
 
 
 @app.command("clone")
+@json_command
 def clone_config(
     src: str = typer.Argument(..., help="Source config name to copy from."),
     dst: str = typer.Argument(..., help="New config name to create."),
@@ -444,6 +451,7 @@ def clone_config(
     overwrite: bool = typer.Option(
         False, "--overwrite", help="Overwrite DST if it already exists."
     ),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Clone SRC config to DST (same backend). Useful when quick-setup
     `--copy-from` isn't enough — e.g. cloning a tuned config to a new name
@@ -463,9 +471,11 @@ def clone_config(
         profile_store._atomic_write(dst_path, source.read_text())
         saved = dst_path
     print(saved)
+    return {"action": "cloned", "backend": bk, "source": src, "config": dst, "path": str(saved)}
 
 
 @app.command("rename")
+@json_command
 def rename_config(
     old: str = typer.Argument(..., help="Existing config name."),
     new: str = typer.Argument(..., help="New config name."),
@@ -474,6 +484,7 @@ def rename_config(
         help="Backend of the config; required if OLD exists in both backends.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Rename a config YAML and repoint every profile that referenced it."""
     from tui.common import config_store
@@ -501,7 +512,8 @@ def rename_config(
                 f"(referenced by profiles: {listed} — they will be repointed)"
             )
         if not typer.confirm(prompt):
-            raise typer.Exit(code=0)
+            typer.echo("Declined: nothing was changed.", err=True)
+            return {"action": "declined", "backend": bk, "config": old}
 
     try:
         updated = config_store.rename_config(bk, old, new)
@@ -513,6 +525,10 @@ def rename_config(
     print(f"Renamed {_config_path(bk, old)} → {_config_path(bk, new)}")
     for name in updated:
         print(f"Repointed profile: {name}")
+    return {
+        "action": "renamed", "backend": bk, "old": old, "config": new,
+        "path": str(_config_path(bk, new)), "repointed_profiles": list(updated),
+    }
 
 
 @app.command("flags")
@@ -780,10 +796,12 @@ def _derive_config_name(model_id: str) -> str:
 
 
 @app.command("delete")
+@json_command
 def delete_config(
     name: str = typer.Argument(...),
     backend: Optional[str] = typer.Option(None, "--backend", "-b"),
     yes: bool = typer.Option(False, "--yes", "-y"),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Delete a config YAML."""
     from tui.common import config_store
@@ -803,7 +821,8 @@ def delete_config(
                 f"(referenced by profiles: {listed} — their config_name will be cleared)"
             )
         if not typer.confirm(prompt):
-            raise typer.Exit(code=0)
+            typer.echo("Declined: nothing was changed.", err=True)
+            return {"action": "declined", "backend": bk, "config": name}
     try:
         changed = config_store.delete_config(bk, name)
     except ValueError as exc:
@@ -814,3 +833,4 @@ def delete_config(
     print(f"Deleted {path}")
     for profile_name in changed:
         print(f"Cleared config_name on profile: {profile_name}")
+    return {"action": "deleted", "backend": bk, "config": name, "cleared_profiles": list(changed)}

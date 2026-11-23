@@ -9,12 +9,21 @@ import typer
 
 from tui.backends.llamacpp.backend import LLAMACPP_OFFICIAL_REPO
 from tui.backends.vllm.backend_inspect import VLLM_OFFICIAL_REPO
-from tui.cli._runtime import emit_json, emit_table, run_async, stream_async
+from tui.cli._runtime import (
+    JSON_OPTION,
+    emit_json,
+    emit_table,
+    finish_stream,
+    json_command,
+    run_async,
+    stream_async,
+)
 from tui.common import system_operations
 from tui.common.dev_build import (
     image_reference_credential_error,
     image_tag_error,
     repo_url_error,
+    sanitize_docker_tag,
 )
 
 app = typer.Typer(help="Docker image inventory + dev image build.", no_args_is_help=True)
@@ -120,6 +129,7 @@ _PULL_DEFAULTS = {
 
 
 @app.command("pull")
+@json_command
 def pull_image(
     tag: Optional[str] = typer.Argument(
         None,
@@ -127,7 +137,7 @@ def pull_image(
              "llama.cpp defaults to 'server-cuda'.",
     ),
     backend: str = typer.Option(
-        "vllm", "--backend",
+        "vllm", "--backend", "-b",
         help="Selects per-backend default repo/tag (vllm → vllm/vllm-openai, "
              "llamacpp → ghcr.io/ggml-org/llama.cpp:server-cuda).",
     ),
@@ -135,6 +145,7 @@ def pull_image(
         "", "--repo",
         help="Repo override; empty = backend default.",
     ),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """`docker pull <repo>:<tag>` — backend-aware defaults, raw docker output."""
     if backend not in _PULL_DEFAULTS:
@@ -157,11 +168,14 @@ def pull_image(
         raise typer.BadParameter(error, param_hint="TAG")
     rc, lines = run_async(system_operations.pull_image(full))
     for line in lines:
-        typer.echo(line)
-    raise typer.Exit(code=rc)
+        typer.echo(line, err=rc != 0)
+    if rc != 0:
+        raise typer.Exit(code=rc)
+    return {"action": "pulled", "backend": backend, "image": full}
 
 
 @app.command("remove")
+@json_command
 def remove_image(
     ref: str = typer.Argument(
         ...,
@@ -174,6 +188,7 @@ def remove_image(
         False, "--force", "-f",
         help="Pass --force to `docker rmi` (removes even if a stopped container references it).",
     ),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """`docker rmi <ref>` — drop a local image without leaving the CLI."""
     credential_error = image_reference_credential_error(ref)
@@ -181,17 +196,19 @@ def remove_image(
         raise typer.BadParameter(credential_error, param_hint="REF")
     rc, output = run_async(system_operations.remove_image(ref, force=force))
     if output:
-        typer.echo(output)
-    raise typer.Exit(code=rc)
+        typer.echo(output, err=rc != 0)
+    if rc != 0:
+        raise typer.Exit(code=rc)
+    return {"action": "removed", "image": ref}
 
 
 @app.command("build-dev")
 def build_dev(
     backend: str = typer.Option(
-        "vllm", "--backend", help="Which backend to build for (vllm or llamacpp)."
+        "vllm", "--backend", "-b", help="Which backend to build for (vllm or llamacpp)."
     ),
     branch: str = typer.Option(
-        "", "--branch", "-b", help="Source branch (default from .env.common)."
+        "", "--branch", help="Source branch (default from .env.common)."
     ),
     repo_url: str = typer.Option(
         "", "--repo-url", help="Source repo URL (default from .env.common)."
@@ -212,6 +229,7 @@ def build_dev(
         False, "--multi-arch",
         help="llamacpp only: disable GPU auto-detection and build for all archs (portable, slow).",
     ),
+    json_out: bool = JSON_OPTION,
 ) -> None:
     """Build a backend development image from source."""
     if backend not in ("vllm", "llamacpp"):
@@ -220,6 +238,7 @@ def build_dev(
     error = repo_url_error(repo_url)
     if error:
         raise typer.BadParameter(error, param_hint="--repo-url")
+    sink: dict = {}
 
     if backend == "vllm":
         from tui.backends.vllm.backend_runtime import (
@@ -241,7 +260,9 @@ def build_dev(
                 repo_url=repo_url,
                 custom_tag=custom_tag,
                 use_official=official,
-            )
+            ),
+            json_out=json_out,
+            sink=sink,
         )
     else:
         from tui.backends.llamacpp.backend_runtime import (
@@ -264,6 +285,13 @@ def build_dev(
                 custom_tag=custom_tag,
                 cuda_arch=cuda_arch,
                 use_multi_arch=multi_arch,
-            )
+            ),
+            json_out=json_out,
+            sink=sink,
         )
-    raise typer.Exit(code=rc)
+    from tui.backends.llamacpp.backend_runtime import LLAMACPP_DEV_SPEC
+    from tui.backends.vllm.backend_runtime import VLLM_DEV_SPEC
+
+    spec = VLLM_DEV_SPEC if backend == "vllm" else LLAMACPP_DEV_SPEC
+    image = f"{spec.image_prefix}:{sanitize_docker_tag(custom_tag or branch)}"
+    finish_stream(rc, json_out=json_out, record={"backend": backend, "image": image}, sink=sink)

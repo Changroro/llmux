@@ -270,6 +270,16 @@ async def container_snapshots(
     return parse_container_snapshots(out)
 
 
+async def container_images() -> dict[str, str]:
+    """Container name → the image reference it was created from (all states)."""
+    rc, out = await run_command(
+        "docker", "ps", "--all", "--format", "{{.Names}}\t{{.Image}}", timeout=5
+    )
+    if rc != 0:
+        raise RuntimeError(out.strip() or "docker ps failed")
+    return dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+
+
 async def running_container_names() -> RunningContainerNames:
     return RunningContainerNames(await container_snapshots())
 

@@ -405,7 +405,13 @@ class ContainerUpScreen(Screen):
 
         from tui.common.widgets import confirm_model_switch
 
-        if not await confirm_model_switch(self, "llamacpp", self.profile_name):
+        if not await confirm_model_switch(
+            self, "llamacpp", self.profile_name,
+            precheck=lambda: stream_container_up(
+                self.profile_name, use_dev=use_dev, use_default_image=use_default_image,
+                tag=tag, repo_url=repo_url, branch=branch, dry_run=True, stage_image=True,
+            ),
+        ):
             return
 
         try:
