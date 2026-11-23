@@ -193,7 +193,7 @@ wheels = [
 
 [[package]]
 name = "llmux"
-version = "2.8.1"
+version = "3.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "hf-mem" },
