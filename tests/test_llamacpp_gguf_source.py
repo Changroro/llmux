@@ -200,6 +200,7 @@ def test_edit_fails_when_the_repo_changes_during_validation(monkeypatch) -> None
     assert (_raw_profile("a")["hf_repo"], _raw_profile("a")["hf_file"]) == ("o/B", "a.gguf")
 
 
+@pytest.mark.migration
 def test_root_callback_skips_migration_writes_on_dry_run(monkeypatch) -> None:
     import sys
     from unittest.mock import Mock
@@ -214,3 +215,46 @@ def test_root_callback_skips_migration_writes_on_dry_run(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["llmux", "up", "lp"])
     _migrate_legacy_storage()
     migrate.assert_called_once()
+
+
+def test_in_process_cli_runs_never_migrate_real_files(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    from typer.testing import CliRunner
+
+    from tui.cli import app
+
+    migrate = Mock(return_value=[])
+    monkeypatch.setattr(backend, "migrate_gguf_sources", migrate)
+    CliRunner().invoke(app, ["profile", "list", "--json"])
+    migrate.assert_not_called()
+
+
+def test_cli_subprocesses_never_see_the_real_checkout() -> None:
+    import os
+
+    root = Path(__file__).resolve().parents[1]
+    assert Path(os.environ["LLMUX_ROOT"]).resolve() != root
+
+
+def test_help_never_migrates(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    (tmp_path / "compose").mkdir()
+    (tmp_path / "config" / "llamacpp").mkdir(parents=True)
+    (tmp_path / "profiles.yaml").write_text(
+        "version: 1\nprofiles:\n  - name: a\n    backend: llamacpp\n    hf_repo: o/r\n    model_file: a.gguf\n"
+    )
+    config = tmp_path / "config" / "llamacpp" / "a.yaml"
+    config.write_text("model-file: a.gguf\nflash-attn: on\n")
+    before = [p.read_bytes() for p in (tmp_path / "profiles.yaml", config)]
+    result = subprocess.run(
+        [sys.executable, "-m", "tui", "up", "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "LLMUX_ROOT": str(tmp_path), "LLMUX_NONINTERACTIVE": "1", "NO_COLOR": "1"},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert [p.read_bytes() for p in (tmp_path / "profiles.yaml", config)] == before
